@@ -20,4 +20,8 @@ public class MemTable {
     public void delete(String key){
         memTable.remove(key);
     }
+
+    public ConcurrentSkipListMap<String, String> getTable(){
+        return memTable;
+    }
 }

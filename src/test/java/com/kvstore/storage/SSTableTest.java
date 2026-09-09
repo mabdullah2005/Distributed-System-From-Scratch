@@ -24,7 +24,6 @@ public class SSTableTest{
     void setUp(){
         pathFile = tempDir.resolve("test_ssTable.log").toString();
         memTable = new MemTable();
-        ssTable = new SSTable();
     }
 
     @Test
@@ -33,7 +32,8 @@ public class SSTableTest{
         memTable.put("Zebra", "black and white");
         memTable.put("Ant", "brown");
 
-        ssTable.flushToDisk(memTable, pathFile);
+        SSTable ssTable = new SSTable(memTable);
+        ssTable.flushToDisk(pathFile);
 
         List<String> lines = java.nio.file.Files.readAllLines(Paths.get(pathFile));
 
