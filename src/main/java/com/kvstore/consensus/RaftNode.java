@@ -1,6 +1,8 @@
 package com.kvstore.consensus;
 
 import java.util.concurrent.*;
+import java.util.List;
+import java.util.ArrayList;
 
 public class RaftNode {
     public enum NodeState{
@@ -10,6 +12,7 @@ public class RaftNode {
     };
     private int term;
     private NodeState state;
+    private List<LogEntry> raftLog;
 
     private ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
     private ScheduledFuture<?> currentTimer;
@@ -20,6 +23,9 @@ public class RaftNode {
     public RaftNode(){
         this.term = 0;
         this.state = NodeState.FOLLOWER;
+        this.raftLog = new ArrayList<>();
+
+        raftLog.add(new LogEntry(0, "dummy"));
 
         currentTimer = this.scheduler.schedule(this::startElection,
                 ThreadLocalRandom.current().nextInt(MIN_TIMER, MAX_TIMER),
@@ -49,5 +55,17 @@ public class RaftNode {
         currentTimer = this.scheduler.schedule(this::startElection,
                 ThreadLocalRandom.current().nextInt(MIN_TIMER, MAX_TIMER),
                 TimeUnit.MILLISECONDS);
+    }
+
+    public synchronized int getLastLogIndex(){
+        return raftLog.size() - 1;
+    }
+
+    public synchronized LogEntry getLogAtIndex(int index){
+        return raftLog.get(index);
+    }
+
+    public synchronized void append(LogEntry entry){
+        raftLog.add(entry);
     }
 }
