@@ -60,10 +60,12 @@ public class KVServiceImpl extends KVServiceGrpc.KVServiceImplBase{
     public void appendEntries(AppendEntriesRequest request,
                               StreamObserver<AppendEntriesResponse> streamObserver){
         AppendEntriesResponse response;
+        int requestTerm = request.getTerm();
+        int raftTerm = raftNode.getTerm();
 
-        if(request.getTerm() < raftNode.getTerm()){
+        if(requestTerm < raftTerm){
             response = AppendEntriesResponse.newBuilder()
-                    .setTerm(raftNode.getTerm())
+                    .setTerm(raftTerm)
                     .setSuccess(false)
                     .build();
 
@@ -73,10 +75,30 @@ public class KVServiceImpl extends KVServiceGrpc.KVServiceImplBase{
         }
         raftNode.resetElectionTimer();
 
-        for(String entry: request.getEntriesList()){
-            raftNode.append(new LogEntry(raftNode.getTerm(), entry));
+        if(request.getPrevLogIndex() > raftNode.getLastLogIndex()
+                || request.getPrevLogTerm() != raftNode.getLogAtIndex(request.getPrevLogIndex()).term()){
+            response = AppendEntriesResponse.newBuilder()
+                    .setTerm(raftTerm)
+                    .setSuccess(false)
+                    .build();
+
+            streamObserver.onNext(response);
+            streamObserver.onCompleted();
+            return;
         }
-        response = AppendEntriesResponse.newBuilder().setTerm(raftNode.getTerm())
+
+        raftNode.truncateLogFromIndex(request.getPrevLogIndex());
+        for(String entry: request.getEntriesList()){
+            raftNode.append(new LogEntry(raftTerm, entry));
+        }
+
+        if(request.getLeaderCommitIndex() != raftNode.getCommitIndex()){
+            int newIndex = Math.min(request.getLeaderCommitIndex(), raftNode.getLastLogIndex());
+            raftNode.setCommitIndex(newIndex);
+        }
+
+        response = AppendEntriesResponse.newBuilder()
+                .setTerm(raftTerm)
                 .setSuccess(true)
                 .build();
 

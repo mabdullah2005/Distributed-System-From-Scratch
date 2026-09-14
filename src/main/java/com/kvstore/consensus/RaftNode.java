@@ -12,6 +12,7 @@ public class RaftNode {
     };
     private int term;
     private NodeState state;
+    private int commitIndex;
     private List<LogEntry> raftLog;
 
     private ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
@@ -23,8 +24,9 @@ public class RaftNode {
     public RaftNode(){
         this.term = 0;
         this.state = NodeState.FOLLOWER;
-        this.raftLog = new ArrayList<>();
+        this.commitIndex = 0;
 
+        this.raftLog = new ArrayList<>();
         raftLog.add(new LogEntry(0, "dummy"));
 
         currentTimer = this.scheduler.schedule(this::startElection,
@@ -38,6 +40,14 @@ public class RaftNode {
 
     public synchronized NodeState getState(){
         return state;
+    }
+
+    public synchronized int getCommitIndex(){
+        return commitIndex;
+    }
+
+    public synchronized void setCommitIndex(int newIndex){
+        commitIndex = newIndex;
     }
 
     public synchronized void startElection(){
@@ -63,6 +73,10 @@ public class RaftNode {
 
     public synchronized LogEntry getLogAtIndex(int index){
         return raftLog.get(index);
+    }
+
+    public synchronized void truncateLogFromIndex(int index){
+        raftLog.subList(index + 1, raftLog.size()).clear();
     }
 
     public synchronized void append(LogEntry entry){
