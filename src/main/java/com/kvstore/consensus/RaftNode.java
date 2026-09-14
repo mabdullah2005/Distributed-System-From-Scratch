@@ -1,7 +1,14 @@
 package com.kvstore.consensus;
 
+import com.google.common.util.concurrent.AbstractScheduledService;
+import com.kvstore.grpc.AppendEntriesRequest;
+import com.kvstore.grpc.AppendEntriesResponse;
+import com.kvstore.grpc.KVServiceGrpc;
 import com.kvstore.storage.MemTable;
 import com.kvstore.storage.StorageEngine;
+
+import io.grpc.ManagedChannel;
+import io.grpc.ManagedChannelBuilder;
 
 import java.io.IOException;
 import java.util.concurrent.*;
@@ -21,17 +28,23 @@ public class RaftNode {
     private StorageEngine engine;
     private List<LogEntry> raftLog;
 
+    private final Integer myPort;
+    private List<Integer> peerPorts;
+
     private ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
     private ScheduledFuture<?> currentTimer;
 
     private static final int MIN_TIMER = 150;
     private static final int MAX_TIMER = 300;
 
-    public RaftNode(StorageEngine engine){
+    public RaftNode(StorageEngine engine, Integer myPort, List<Integer> peerPorts){
         this.term = 0;
         this.state = NodeState.FOLLOWER;
         this.commitIndex = 0;
         this.lastApplied = 0;
+
+        this.myPort = myPort;
+        this.peerPorts = peerPorts;
         this.engine = engine;
 
         this.raftLog = new ArrayList<>();
@@ -66,6 +79,13 @@ public class RaftNode {
 
     public synchronized void becomeLeader(){
         state = NodeState.LEADER;
+
+        currentTimer.cancel(false);
+        ScheduledFuture<?> heartbeatScheduler = scheduler.scheduleAtFixedRate(
+                this::broadcastAppendEntries,
+                0,
+                50,
+                TimeUnit.MILLISECONDS);
     }
 
     public synchronized void resetElectionTimer(){
@@ -106,6 +126,40 @@ public class RaftNode {
                 engine.put(key, value);
             }catch(IOException e){
                 e.printStackTrace();
+            }
+        }
+    }
+
+    public void broadcastAppendEntries(){
+        if(state != NodeState.LEADER){
+            return;
+        }
+
+        for(Integer port: peerPorts){
+            ManagedChannel channel = ManagedChannelBuilder
+                    .forAddress("localhost", port)
+                    .usePlaintext()
+                    .build();
+
+            KVServiceGrpc.KVServiceBlockingStub stub = KVServiceGrpc.newBlockingStub(channel);
+
+            AppendEntriesRequest request = AppendEntriesRequest.newBuilder()
+                    .setTerm(term)
+                    .setLeaderId("port " + myPort)
+                    .setPrevLogIndex(getLastLogIndex())
+                    .setPrevLogTerm(getLogAtIndex(getLastLogIndex()).term())
+                    .setLeaderCommitIndex(commitIndex)
+                    .build();
+
+            try{
+                AppendEntriesResponse response = stub.appendEntries(request);
+                if(response.getSuccess()){
+                    System.out.println("Node " + port + "accepted the logs!");
+                }
+            } catch (Exception e) {
+                System.out.println("Error: port" + port + "did not accept the logs");
+            } finally{
+                channel.shutdown();
             }
         }
     }
