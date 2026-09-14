@@ -70,14 +70,26 @@ public class RaftNode {
         applyCommittedLogs();
     }
 
-    public synchronized void startElection(){
-        term++;
-        state = NodeState.CANDIDATE;
+    public synchronized void updateTerm(int newTerm){
+        if(newTerm > term){
+            term = newTerm;
+            state = NodeState.FOLLOWER;
+        }
+    }
+
+    public void startElection(){
+        synchronized(this) {
+            resetElectionTimer();
+            term++;
+            state = NodeState.CANDIDATE;
+            System.out.println("Timer expired! Starting election for Term " + term);
+        }
 
         broadcastRequestVote();
     }
 
     public synchronized void becomeLeader(){
+        System.out.println("\n👑 I WON! I AM THE LEADER FOR TERM " + term + "!");
         state = NodeState.LEADER;
 
         currentTimer.cancel(false);
@@ -131,8 +143,15 @@ public class RaftNode {
     }
 
     public void broadcastAppendEntries(){
-        if(state != NodeState.LEADER){
-            return;
+        int currentTerm;
+        int currentCommitIndex;
+
+        synchronized(this) {
+            if(state != NodeState.LEADER){
+                return;
+            }
+            currentTerm = term;
+            currentCommitIndex = commitIndex;
         }
 
         for(Integer port: peerPorts){

@@ -92,6 +92,9 @@ public class KVServiceImpl extends KVServiceGrpc.KVServiceImplBase{
             return;
         }
         raftNode.resetElectionTimer();
+        raftNode.updateTerm(requestTerm);
+
+        raftTerm = raftNode.getTerm();
 
         if(request.getPrevLogIndex() > raftNode.getLastLogIndex()
                 || request.getPrevLogTerm() != raftNode.getLogAtIndex(request.getPrevLogIndex()).term()){
@@ -127,10 +130,11 @@ public class KVServiceImpl extends KVServiceGrpc.KVServiceImplBase{
     @Override
     public void requestVote(RequestVoteRequest request, StreamObserver<RequestVoteResponse> streamObserver){
         RequestVoteResponse response;
-        int raftTerm = raftNode.getTerm();
 
         if(request.getTerm() > raftNode.getTerm()){
             raftNode.resetElectionTimer();
+            raftNode.updateTerm(request.getTerm());
+
             response = RequestVoteResponse.newBuilder()
                     .setTerm(raftNode.getTerm())
                     .setVoteGranted(true)
