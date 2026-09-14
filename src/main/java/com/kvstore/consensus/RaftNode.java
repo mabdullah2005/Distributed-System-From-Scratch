@@ -1,9 +1,7 @@
 package com.kvstore.consensus;
 
 import com.google.common.util.concurrent.AbstractScheduledService;
-import com.kvstore.grpc.AppendEntriesRequest;
-import com.kvstore.grpc.AppendEntriesResponse;
-import com.kvstore.grpc.KVServiceGrpc;
+import com.kvstore.grpc.*;
 import com.kvstore.storage.MemTable;
 import com.kvstore.storage.StorageEngine;
 
@@ -75,6 +73,8 @@ public class RaftNode {
     public synchronized void startElection(){
         term++;
         state = NodeState.CANDIDATE;
+
+        broadcastRequestVote();
     }
 
     public synchronized void becomeLeader(){
@@ -161,6 +161,41 @@ public class RaftNode {
             } finally{
                 channel.shutdown();
             }
+        }
+    }
+
+    public void broadcastRequestVote(){
+        int voteCount = 1;
+
+        for(Integer peer: peerPorts){
+            ManagedChannel channel = ManagedChannelBuilder
+                    .forAddress("localhost", peer)
+                    .usePlaintext()
+                    .build();
+
+            KVServiceGrpc.KVServiceBlockingStub stub = KVServiceGrpc.newBlockingStub(channel);
+            RequestVoteRequest request = RequestVoteRequest.newBuilder()
+                    .setTerm(term)
+                    .setCandidateId("Port" + myPort)
+                    .build();
+
+            try{
+                RequestVoteResponse response = stub.requestVote(request);
+
+                if(response.getVoteGranted()){
+                    voteCount++;
+                }
+            } catch (Exception e) {
+                System.out.println("Error: Port " + peer + "is not alive");
+            } finally{
+                channel.shutdown();
+            }
+        }
+
+        int majority = (peerPorts.size()/2) + 1;
+
+        if(voteCount >= majority){
+            becomeLeader();
         }
     }
 }

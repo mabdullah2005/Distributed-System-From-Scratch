@@ -35,8 +35,19 @@ message AppendEntriesResponse{
   bool success = 2;
 }
 
+message RequestVoteRequest{
+  int32 term = 1;
+  string candidate_id = 2;
+}
+
+message RequestVoteResponse{
+  int32 term = 1;
+  bool vote_granted = 2;
+}
+
 service KVService{
   rpc put(PutRequest) returns (PutResponse);
   rpc get(GetRequest) returns (GetResponse);
   rpc appendEntries(AppendEntriesRequest) returns (AppendEntriesResponse);
+  rpc requestVote(RequestVoteRequest) returns (RequestVoteResponse);
 }
