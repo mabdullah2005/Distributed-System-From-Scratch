@@ -3,28 +3,46 @@ package com.kvstore.network;
 import com.kvstore.consensus.LogEntry;
 import com.kvstore.consensus.RaftNode;
 import com.kvstore.grpc.*;
+import com.kvstore.storage.StorageEngine;
 import io.grpc.stub.StreamObserver;
 
 import com.kvstore.storage.MemTable;
 
 public class KVServiceImpl extends KVServiceGrpc.KVServiceImplBase{
-    private MemTable memTable;
+    private StorageEngine engine;
     private RaftNode raftNode;
 
-    public KVServiceImpl(MemTable memTable,
+    public KVServiceImpl(StorageEngine engine,
                          RaftNode raftNode){
-        this.memTable = memTable;
+        this.engine = engine;
         this.raftNode = raftNode;
     }
 
     @Override
     public void put(PutRequest request,
                     StreamObserver<PutResponse> streamObserver){
+        PutResponse response;
+
+        if(raftNode.getState() != RaftNode.NodeState.LEADER){
+            response = PutResponse.newBuilder()
+                    .setSuccessful(false)
+                    .build();
+
+            streamObserver.onNext(response);
+            streamObserver.onCompleted();
+            return;
+        }
+
+
         String key = request.getKey();
         String value = request.getValue();
-        memTable.put(key, value);
+        String command = key + ":" + value;
+        LogEntry entry = new LogEntry(raftNode.getTerm(), command);
+        raftNode.append(entry);
 
-        PutResponse response = PutResponse.newBuilder()
+        raftNode.setCommitIndex(raftNode.getLastLogIndex());
+
+        response = PutResponse.newBuilder()
                 .setSuccessful(true)
                 .build();
 
@@ -36,7 +54,7 @@ public class KVServiceImpl extends KVServiceGrpc.KVServiceImplBase{
     public void get(GetRequest request,
                     StreamObserver<GetResponse> streamObserver){
         String key = request.getKey();
-        String value = memTable.get(key);
+        String value = engine.get(key);
 
         GetResponse response;
 

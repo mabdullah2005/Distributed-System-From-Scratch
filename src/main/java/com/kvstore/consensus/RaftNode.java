@@ -1,5 +1,9 @@
 package com.kvstore.consensus;
 
+import com.kvstore.storage.MemTable;
+import com.kvstore.storage.StorageEngine;
+
+import java.io.IOException;
 import java.util.concurrent.*;
 import java.util.List;
 import java.util.ArrayList;
@@ -13,6 +17,8 @@ public class RaftNode {
     private int term;
     private NodeState state;
     private int commitIndex;
+    private int lastApplied;
+    private StorageEngine engine;
     private List<LogEntry> raftLog;
 
     private ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
@@ -21,10 +27,12 @@ public class RaftNode {
     private static final int MIN_TIMER = 150;
     private static final int MAX_TIMER = 300;
 
-    public RaftNode(){
+    public RaftNode(StorageEngine engine){
         this.term = 0;
         this.state = NodeState.FOLLOWER;
         this.commitIndex = 0;
+        this.lastApplied = 0;
+        this.engine = engine;
 
         this.raftLog = new ArrayList<>();
         raftLog.add(new LogEntry(0, "dummy"));
@@ -48,6 +56,7 @@ public class RaftNode {
 
     public synchronized void setCommitIndex(int newIndex){
         commitIndex = newIndex;
+        applyCommittedLogs();
     }
 
     public synchronized void startElection(){
@@ -81,5 +90,23 @@ public class RaftNode {
 
     public synchronized void append(LogEntry entry){
         raftLog.add(entry);
+    }
+
+    public synchronized void applyCommittedLogs(){
+        while(commitIndex > lastApplied){
+            lastApplied++;
+
+            String command = getLogAtIndex(lastApplied).command();
+
+            String [] split = command.split(":");
+            String key = split[0];
+            String value = split[1];
+
+            try{
+                engine.put(key, value);
+            }catch(IOException e){
+                e.printStackTrace();
+            }
+        }
     }
 }

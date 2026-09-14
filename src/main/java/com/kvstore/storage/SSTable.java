@@ -31,4 +31,8 @@ public class SSTable {
             channel.force(true);
         }
     }
+
+    public String get(String key){
+        return ssTable.get(key);
+    }
 }
