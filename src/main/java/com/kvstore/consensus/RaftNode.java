@@ -2,11 +2,8 @@ package com.kvstore.consensus;
 
 import com.google.common.util.concurrent.AbstractScheduledService;
 import com.kvstore.grpc.*;
-import com.kvstore.storage.MemTable;
+import com.kvstore.network.RaftRpcClient;
 import com.kvstore.storage.StorageEngine;
-
-import io.grpc.ManagedChannel;
-import io.grpc.ManagedChannelBuilder;
 
 import java.io.IOException;
 import java.util.concurrent.*;
@@ -27,7 +24,7 @@ public class RaftNode {
     private List<LogEntry> raftLog;
 
     private final Integer myPort;
-    private List<Integer> peerPorts;
+    private List<RaftRpcClient> peerPorts;
 
     private ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
     private ScheduledFuture<?> currentTimer;
@@ -35,7 +32,7 @@ public class RaftNode {
     private static final int MIN_TIMER = 150;
     private static final int MAX_TIMER = 300;
 
-    public RaftNode(StorageEngine engine, Integer myPort, List<Integer> peerPorts){
+    public RaftNode(StorageEngine engine, Integer myPort, List<RaftRpcClient> peerPorts){
         this.term = 0;
         this.state = NodeState.FOLLOWER;
         this.commitIndex = 0;
@@ -51,6 +48,10 @@ public class RaftNode {
         currentTimer = this.scheduler.schedule(this::startElection,
                 ThreadLocalRandom.current().nextInt(MIN_TIMER, MAX_TIMER),
                 TimeUnit.MILLISECONDS);
+    }
+
+    public Integer getPort(){
+        return myPort;
     }
 
     public synchronized int getTerm(){
@@ -154,14 +155,7 @@ public class RaftNode {
             currentCommitIndex = commitIndex;
         }
 
-        for(Integer port: peerPorts){
-            ManagedChannel channel = ManagedChannelBuilder
-                    .forAddress("localhost", port)
-                    .usePlaintext()
-                    .build();
-
-            KVServiceGrpc.KVServiceBlockingStub stub = KVServiceGrpc.newBlockingStub(channel);
-
+        for(RaftRpcClient client: peerPorts){
             AppendEntriesRequest request = AppendEntriesRequest.newBuilder()
                     .setTerm(term)
                     .setLeaderId("port " + myPort)
@@ -171,14 +165,12 @@ public class RaftNode {
                     .build();
 
             try{
-                AppendEntriesResponse response = stub.appendEntries(request);
-                if(response.getSuccess()){
-                    System.out.println("Node " + port + "accepted the logs!");
+                AppendEntriesResponse response = client.sendAppendEntries(request);
+                if(response != null && response.getSuccess()){
+                    System.out.println("Node accepted the logs!");
                 }
             } catch (Exception e) {
-                System.out.println("Error: port" + port + "did not accept the logs");
-            } finally{
-                channel.shutdown();
+                System.out.println("Error: port did not accept the logs");
             }
         }
     }
@@ -186,32 +178,24 @@ public class RaftNode {
     public void broadcastRequestVote(){
         int voteCount = 1;
 
-        for(Integer peer: peerPorts){
-            ManagedChannel channel = ManagedChannelBuilder
-                    .forAddress("localhost", peer)
-                    .usePlaintext()
-                    .build();
-
-            KVServiceGrpc.KVServiceBlockingStub stub = KVServiceGrpc.newBlockingStub(channel);
+        for(RaftRpcClient client: peerPorts){
             RequestVoteRequest request = RequestVoteRequest.newBuilder()
                     .setTerm(term)
                     .setCandidateId("Port" + myPort)
                     .build();
 
             try{
-                RequestVoteResponse response = stub.requestVote(request);
+                RequestVoteResponse response = client.sendRequestVote(request);
 
-                if(response.getVoteGranted()){
+                if(response != null && response.getVoteGranted()){
                     voteCount++;
                 }
             } catch (Exception e) {
-                System.out.println("Error: Port " + peer + "is not alive");
-            } finally{
-                channel.shutdown();
+                System.out.println("Error: Port is not alive");
             }
         }
 
-        int majority = (peerPorts.size()/2) + 1;
+        int majority = ((peerPorts.size() + 1)/2) + 1;
 
         if(voteCount >= majority){
             becomeLeader();

@@ -1,7 +1,9 @@
 package com.kvstore;
 
 import com.kvstore.consensus.RaftNode;
+import com.kvstore.network.GrpcRaftClient;
 import com.kvstore.network.KVServiceImpl;
+import com.kvstore.network.RaftRpcClient;
 import com.kvstore.storage.MemTable;
 import com.kvstore.storage.StorageEngine;
 import io.grpc.Server;
@@ -13,16 +15,12 @@ import java.util.ArrayList;
 public class ServerLauncher {
     public static void main(String[] args) throws IOException, InterruptedException {
         Integer myPort = Integer.parseInt(args[0]);
-        ArrayList<Integer> ports = new ArrayList<>();
-        ArrayList<Integer> peerPorts = new ArrayList<>();
+        ArrayList<RaftRpcClient> peerPorts = new ArrayList<>();
 
-        for(String port: args){
-            Integer portInt = Integer.parseInt(port);
-            ports.add(portInt);
+        for(int i = 1; i<args.length; i++){
+            Integer portInt = Integer.parseInt(args[i]);
 
-            if(portInt != myPort){
-                peerPorts.add(portInt);
-            }
+            peerPorts.add(new GrpcRaftClient(portInt));
         }
 
         MemTable memTable = new MemTable();
