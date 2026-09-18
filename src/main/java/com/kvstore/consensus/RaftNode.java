@@ -6,7 +6,6 @@ import com.kvstore.network.RaftRpcClient;
 import com.kvstore.storage.StorageEngine;
 
 import java.io.IOException;
-import java.util.HashMap;
 import java.util.concurrent.*;
 import java.util.List;
 import java.util.ArrayList;
@@ -17,6 +16,7 @@ public class RaftNode {
         CANDIDATE,
         LEADER
     };
+
     private int term;
     private NodeState state;
     private int commitIndex;
@@ -69,11 +69,6 @@ public class RaftNode {
         return commitIndex;
     }
 
-    public synchronized void setCommitIndex(int newIndex){
-        commitIndex = newIndex;
-        applyCommittedLogs();
-    }
-
     public synchronized void updateTerm(int newTerm){
         if(newTerm > term){
             term = newTerm;
@@ -83,7 +78,7 @@ public class RaftNode {
     }
 
     public void startElection(){
-        synchronized(this) {
+        synchronized(this){
             resetElectionTimer();
             term++;
             state = NodeState.CANDIDATE;
@@ -130,80 +125,26 @@ public class RaftNode {
         raftLog.add(entry);
     }
 
+    public synchronized void setCommitIndex(int newIndex){
+        commitIndex = newIndex;
+        applyCommittedLogs();
+    }
+
     public synchronized void applyCommittedLogs(){
         while(commitIndex > lastApplied){
             lastApplied++;
 
             String command = getLogAtIndex(lastApplied).command();
 
-            String [] split = command.split(":");
+            String[] split = command.split(":");
             String key = split[0];
             String value = split[1];
 
             try{
                 engine.put(key, value);
-            }catch(IOException e){
+            } catch(IOException e){
                 e.printStackTrace();
             }
-        }
-    }
-
-    public void broadcastAppendEntries(){
-        int currentTerm;
-        int currentCommitIndex;
-
-        synchronized(this) {
-            if(state != NodeState.LEADER){
-                return;
-            }
-            currentTerm = term;
-            currentCommitIndex = commitIndex;
-        }
-
-        for(RaftRpcClient client: peerPorts){
-            AppendEntriesRequest request = AppendEntriesRequest.newBuilder()
-                    .setTerm(term)
-                    .setLeaderId("port " + myPort)
-                    .setPrevLogIndex(getLastLogIndex())
-                    .setPrevLogTerm(getLogAtIndex(getLastLogIndex()).term())
-                    .setLeaderCommitIndex(commitIndex)
-                    .build();
-
-            try{
-                AppendEntriesResponse response = client.sendAppendEntries(request);
-                if(response != null && response.getSuccess()){
-                    System.out.println("Node accepted the logs!");
-                }
-            } catch (Exception e) {
-                System.out.println("Error: port did not accept the logs");
-            }
-        }
-    }
-
-    public void broadcastRequestVote(){
-        int voteCount = 1;
-
-        for(RaftRpcClient client: peerPorts){
-            RequestVoteRequest request = RequestVoteRequest.newBuilder()
-                    .setTerm(term)
-                    .setCandidateId("Port" + myPort)
-                    .build();
-
-            try{
-                RequestVoteResponse response = client.sendRequestVote(request);
-
-                if(response != null && response.getVoteGranted()){
-                    voteCount++;
-                }
-            } catch (Exception e) {
-                System.out.println("Error: Port is not alive");
-            }
-        }
-
-        int majority = ((peerPorts.size() + 1)/2) + 1;
-
-        if(voteCount >= majority){
-            becomeLeader();
         }
     }
 
@@ -236,5 +177,64 @@ public class RaftNode {
                 .setVoteGranted(false)
                 .setTerm(getTerm())
                 .build();
+    }
+
+    public void broadcastRequestVote(){
+        int voteCount = 1;
+
+        for(RaftRpcClient client : peerPorts){
+            RequestVoteRequest request = RequestVoteRequest.newBuilder()
+                    .setTerm(term)
+                    .setCandidateId("Port" + myPort)
+                    .build();
+
+            try{
+                RequestVoteResponse response = client.sendRequestVote(request);
+
+                if(response != null && response.getVoteGranted()){
+                    voteCount++;
+                }
+            } catch(Exception e){
+                System.out.println("Error: Port is not alive");
+            }
+        }
+
+        int majority = ((peerPorts.size() + 1) / 2) + 1;
+
+        if(voteCount >= majority){
+            becomeLeader();
+        }
+    }
+
+    public void broadcastAppendEntries(){
+        int currentTerm;
+        int currentCommitIndex;
+
+        synchronized(this){
+            if(state != NodeState.LEADER){
+                return;
+            }
+            currentTerm = term;
+            currentCommitIndex = commitIndex;
+        }
+
+        for(RaftRpcClient client : peerPorts){
+            AppendEntriesRequest request = AppendEntriesRequest.newBuilder()
+                    .setTerm(term)
+                    .setLeaderId("port " + myPort)
+                    .setPrevLogIndex(getLastLogIndex())
+                    .setPrevLogTerm(getLogAtIndex(getLastLogIndex()).term())
+                    .setLeaderCommitIndex(commitIndex)
+                    .build();
+
+            try{
+                AppendEntriesResponse response = client.sendAppendEntries(request);
+                if(response != null && response.getSuccess()){
+                    System.out.println("Node accepted the logs!");
+                }
+            } catch(Exception e){
+                System.out.println("Error: port did not accept the logs");
+            }
+        }
     }
 }
