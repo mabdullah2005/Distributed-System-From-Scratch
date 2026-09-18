@@ -129,27 +129,7 @@ public class KVServiceImpl extends KVServiceGrpc.KVServiceImplBase{
 
     @Override
     public void requestVote(RequestVoteRequest request, StreamObserver<RequestVoteResponse> streamObserver){
-        RequestVoteResponse response;
-
-        if(request.getTerm() > raftNode.getTerm()){
-            raftNode.resetElectionTimer();
-            raftNode.updateTerm(request.getTerm());
-
-            response = RequestVoteResponse.newBuilder()
-                    .setTerm(raftNode.getTerm())
-                    .setVoteGranted(true)
-                    .build();
-
-            streamObserver.onNext(response);
-            streamObserver.onCompleted();
-
-            return;
-        }
-
-        response = RequestVoteResponse.newBuilder()
-                .setTerm(raftNode.getTerm())
-                .setVoteGranted(false)
-                .build();
+        RequestVoteResponse response = raftNode.handleVoteRequest(request);
 
         streamObserver.onNext(response);
         streamObserver.onCompleted();

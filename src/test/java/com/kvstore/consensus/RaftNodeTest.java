@@ -67,4 +67,86 @@ public class RaftNodeTest {
         assertEquals(0, node.getTerm());
         assertEquals(NodeState.LEADER, node.getState());
     }
+
+    @Test
+    void vote_granted_if_havent_voted() throws IOException {
+        RequestVoteRequest request = RequestVoteRequest.newBuilder()
+                .setCandidateId("abc")
+                .setTerm(1)
+                .setLastLogIndex(20)
+                .setLastLogTerm(0)
+                .build();
+
+        RequestVoteResponse response = node.handleVoteRequest(request);
+
+        assertEquals(true, response.getVoteGranted());
+        assertEquals(1, response.getTerm());
+        assertEquals(1, node.getTerm());
+    }
+
+    @Test
+    void vote_rejected_if_already_voted(){
+        RequestVoteRequest request = RequestVoteRequest.newBuilder()
+                .setCandidateId("abc")
+                .setTerm(2)
+                .setLastLogIndex(20)
+                .setLastLogTerm(2)
+                .build();
+
+        RequestVoteRequest request2 = RequestVoteRequest.newBuilder()
+                .setCandidateId("cba")
+                .setTerm(2)
+                .setLastLogIndex(20)
+                .setLastLogTerm(2)
+                .build();
+
+        RequestVoteResponse response = node.handleVoteRequest(request);
+        RequestVoteResponse response2 = node.handleVoteRequest(request2);
+        RequestVoteResponse response3 = node.handleVoteRequest(request);
+
+        assertTrue(response.getVoteGranted());
+        assertFalse(response2.getVoteGranted());
+        assertTrue(response3.getVoteGranted());
+    }
+
+    @Test
+    void vote_rejected_if_log_stale(){
+        RequestVoteRequest request = RequestVoteRequest.newBuilder()
+                .setCandidateId("abc")
+                .setTerm(0)
+                .setLastLogIndex(0)
+                .setLastLogTerm(0)
+                .build();
+
+        node.append(new LogEntry(0, "def"));
+
+        RequestVoteResponse response = node.handleVoteRequest(request);
+
+        assertFalse(response.getVoteGranted());
+    }
+
+    @Test
+    void multi_term_votes(){
+        RequestVoteRequest request = RequestVoteRequest.newBuilder()
+                .setCandidateId("abc")
+                .setTerm(1)
+                .setLastLogIndex(2)
+                .setLastLogTerm(0)
+                .build();
+
+        RequestVoteRequest request2 = RequestVoteRequest.newBuilder()
+                .setCandidateId("def")
+                .setTerm(2)
+                .setLastLogIndex(5)
+                .setLastLogTerm(1)
+                .build();
+
+        RequestVoteResponse response = node.handleVoteRequest(request);
+        assertTrue(response.getVoteGranted());
+        assertEquals(1, node.getTerm());
+
+        RequestVoteResponse response2 = node.handleVoteRequest(request2);
+        assertTrue(response2.getVoteGranted());
+        assertEquals(2, node.getTerm());
+    }
 }

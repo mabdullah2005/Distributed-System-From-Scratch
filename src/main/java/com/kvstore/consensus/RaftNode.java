@@ -1,11 +1,12 @@
 package com.kvstore.consensus;
 
-import com.google.common.util.concurrent.AbstractScheduledService;
+import com.google.rpc.context.AttributeContext;
 import com.kvstore.grpc.*;
 import com.kvstore.network.RaftRpcClient;
 import com.kvstore.storage.StorageEngine;
 
 import java.io.IOException;
+import java.util.HashMap;
 import java.util.concurrent.*;
 import java.util.List;
 import java.util.ArrayList;
@@ -22,6 +23,7 @@ public class RaftNode {
     private int lastApplied;
     private StorageEngine engine;
     private List<LogEntry> raftLog;
+    private String votedFor;
 
     private final Integer myPort;
     private List<RaftRpcClient> peerPorts;
@@ -43,6 +45,7 @@ public class RaftNode {
         this.engine = engine;
 
         this.raftLog = new ArrayList<>();
+        this.votedFor = null;
         raftLog.add(new LogEntry(0, "dummy"));
 
         currentTimer = this.scheduler.schedule(this::startElection,
@@ -75,6 +78,7 @@ public class RaftNode {
         if(newTerm > term){
             term = newTerm;
             state = NodeState.FOLLOWER;
+            votedFor = null;
         }
     }
 
@@ -83,6 +87,7 @@ public class RaftNode {
             resetElectionTimer();
             term++;
             state = NodeState.CANDIDATE;
+            votedFor = "Node" + myPort;
             System.out.println("Timer expired! Starting election for Term " + term);
         }
 
@@ -200,5 +205,36 @@ public class RaftNode {
         if(voteCount >= majority){
             becomeLeader();
         }
+    }
+
+    public synchronized RequestVoteResponse handleVoteRequest(RequestVoteRequest request){
+        String candidateID = request.getCandidateId();
+        int requestTerm = request.getTerm();
+        int requestLastLogTerm = request.getLastLogTerm();
+        int requestLastLogIndex = request.getLastLogIndex();
+        int myTerm = getTerm();
+        int myLastLogIndex = getLastLogIndex();
+        int myLastLogTerm = getLogAtIndex(myLastLogIndex).term();
+
+        if(requestTerm >= myTerm){
+            updateTerm(requestTerm);
+            if(votedFor == null || votedFor.equals(candidateID)){
+                if(requestLastLogTerm > myLastLogTerm ||
+                        (requestLastLogTerm == myLastLogTerm && requestLastLogIndex >= myLastLogIndex)){
+                    resetElectionTimer();
+                    votedFor = candidateID;
+
+                    return RequestVoteResponse.newBuilder()
+                            .setTerm(requestTerm)
+                            .setVoteGranted(true)
+                            .build();
+                }
+            }
+        }
+
+        return RequestVoteResponse.newBuilder()
+                .setVoteGranted(false)
+                .setTerm(getTerm())
+                .build();
     }
 }

@@ -38,6 +38,8 @@ message AppendEntriesResponse{
 message RequestVoteRequest{
   int32 term = 1;
   string candidate_id = 2;
+  int32 last_log_term = 3;
+  int32 last_log_index = 4;
 }
 
 message RequestVoteResponse{
