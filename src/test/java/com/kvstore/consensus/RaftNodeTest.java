@@ -16,6 +16,7 @@ import com.kvstore.consensus.RaftNode.NodeState;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.List;
 
 public class RaftNodeTest {
     private RaftNode node;
@@ -276,5 +277,105 @@ public class RaftNodeTest {
         assertFalse(result);
         assertEquals(0, raftNode.getLastLogIndex());
         assertEquals(0, raftNode.getCommitIndex());
+    }
+
+    @Test
+    void follower_replaces_divergent_entries() {
+        node.append(new LogEntry(1, "k1:v1"));
+        node.append(new LogEntry(1, "k2:v2_old"));
+
+        AppendEntriesRequest request = AppendEntriesRequest.newBuilder()
+                .setTerm(2)
+                .setLeaderId("leader")
+                .setPrevLogIndex(1)
+                .setPrevLogTerm(1)
+                .addEntries("k2:v2_new")
+                .setLeaderCommitIndex(2)
+                .build();
+
+        AppendEntriesResponse response = node.handleAppendEntry(request);
+
+        assertTrue(response.getSuccess());
+        assertEquals(2, node.getLastLogIndex());
+        assertEquals("k2:v2_new", node.getLogAtIndex(2).command());
+    }
+
+    @Test
+    void follower_rejects_when_prev_index_greater_than_last_index() {
+        AppendEntriesRequest request = AppendEntriesRequest.newBuilder()
+                .setTerm(1)
+                .setLeaderId("leader")
+                .setPrevLogIndex(2)
+                .setPrevLogTerm(1)
+                .addEntries("k3:v3")
+                .setLeaderCommitIndex(0)
+                .build();
+
+        AppendEntriesResponse response = node.handleAppendEntry(request);
+
+        assertFalse(response.getSuccess());
+    }
+
+    @Test
+    void leader_synchronizes_log() {
+        List<AppendEntriesRequest> laggingPeerRequests = new ArrayList<>();
+
+        RaftRpcClient upToDatePeer = new RaftRpcClient() {
+            @Override
+            public AppendEntriesResponse sendAppendEntries(AppendEntriesRequest request) {
+                return AppendEntriesResponse.newBuilder()
+                        .setSuccess(true)
+                        .setTerm(request.getTerm())
+                        .build();
+            }
+
+            @Override
+            public RequestVoteResponse sendRequestVote(RequestVoteRequest request) {
+                return null;
+            }
+        };
+
+        RaftRpcClient laggingPeer = new RaftRpcClient() {
+            @Override
+            public AppendEntriesResponse sendAppendEntries(AppendEntriesRequest request) {
+                laggingPeerRequests.add(request);
+                if (request.getPrevLogIndex() > 0) {
+                    return AppendEntriesResponse.newBuilder()
+                            .setSuccess(false)
+                            .setTerm(request.getTerm())
+                            .build();
+                }
+                return AppendEntriesResponse.newBuilder()
+                        .setSuccess(true)
+                        .setTerm(request.getTerm())
+                        .build();
+            }
+
+            @Override
+            public RequestVoteResponse sendRequestVote(RequestVoteRequest request) {
+                return null;
+            }
+        };
+
+        RaftNode leader = new RaftNode(
+                storageEngine,
+                myPort,
+                Arrays.asList(upToDatePeer, laggingPeer));
+
+        leader.becomeLeader();
+
+        boolean firstReplicated = leader.replicateLog("k1:v1");
+        assertTrue(firstReplicated);
+
+        laggingPeerRequests.clear();
+
+        boolean secondReplicated = leader.replicateLog("k2:v2");
+        assertTrue(secondReplicated);
+
+        assertTrue(laggingPeerRequests.size() >= 2, "Leader must retry with decremented nextIndex upon rejection");
+
+        AppendEntriesRequest successfulRequest = laggingPeerRequests.get(laggingPeerRequests.size() - 1);
+        assertEquals(0, successfulRequest.getPrevLogIndex());
+        assertEquals(Arrays.asList("k1:v1", "k2:v2"), successfulRequest.getEntriesList());
     }
 }

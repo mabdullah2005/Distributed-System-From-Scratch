@@ -5,6 +5,7 @@ import com.kvstore.network.RaftRpcClient;
 import com.kvstore.storage.StorageEngine;
 
 import java.io.IOException;
+import java.util.HashMap;
 import java.util.concurrent.*;
 import java.util.List;
 import java.util.ArrayList;
@@ -26,6 +27,8 @@ public class RaftNode {
 
     private final Integer myPort;
     private List<RaftRpcClient> peerPorts;
+    private HashMap<RaftRpcClient, Integer> nextIndex;
+    private HashMap<RaftRpcClient, Integer> matchIndex;
 
     private ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
     private ScheduledFuture<?> currentTimer;
@@ -92,6 +95,14 @@ public class RaftNode {
         System.out.println("\n👑 I WON! I AM THE LEADER FOR TERM " + term + "!");
         state = NodeState.LEADER;
 
+        nextIndex = new HashMap<>();
+        matchIndex = new HashMap<>();
+
+        for(RaftRpcClient peer: peerPorts){
+            nextIndex.put(peer, getLastLogIndex()+1);
+            matchIndex.put(peer, 0);
+        }
+
         currentTimer.cancel(false);
         ScheduledFuture<?> heartbeatScheduler = scheduler.scheduleAtFixedRate(
                 this::heartBeat,
@@ -149,6 +160,7 @@ public class RaftNode {
 
     public synchronized AppendEntriesResponse handleAppendEntry(AppendEntriesRequest request){
         int requestTerm = request.getTerm();
+        int requestPrevIndex = request.getPrevLogIndex();
         int leaderCommitIndex = request.getLeaderCommitIndex();
 
         if(requestTerm >= getTerm()){
@@ -156,8 +168,10 @@ public class RaftNode {
             state = NodeState.FOLLOWER;
             resetElectionTimer();
 
-            if(request.getPrevLogIndex() == getLastLogIndex() &&
-                    request.getPrevLogTerm() == getLogAtIndex(getLastLogIndex()).term()){
+            if(requestPrevIndex <= getLastLogIndex() &&
+                    request.getPrevLogTerm() == getLogAtIndex(requestPrevIndex).term()){
+
+                truncateLogFromIndex(requestPrevIndex);
 
                 for(String command: request.getEntriesList()){
                     LogEntry entry = new LogEntry(getTerm(), command);
@@ -238,9 +252,38 @@ public class RaftNode {
             try{
                 AppendEntriesResponse response = peer.sendAppendEntries(request);
 
-                if(response != null && response.getSuccess()){
-                    successCount++;
+                if(response == null){
+                    continue;
                 }
+
+                while(!response.getSuccess()){
+                    Integer newValue = nextIndex.get(peer) - 1;
+                    nextIndex.replace(peer, newValue);
+
+                    List<String> entries = new ArrayList<>();
+                    int index = newValue;
+
+                    while(index <= getLastLogIndex()){
+                        if(index != 0) {
+                            entries.add(raftLog.get(index).command());
+                        }
+                        index++;
+                    }
+
+                    request = AppendEntriesRequest.newBuilder()
+                            .setTerm(getTerm())
+                            .setLeaderId("port" + getPort())
+                            .setPrevLogIndex(newValue)
+                            .setPrevLogTerm(getLogAtIndex(newValue).term())
+                            .addAllEntries(entries)
+                            .setLeaderCommitIndex(getCommitIndex())
+                            .build();
+
+                    response = peer.sendAppendEntries(request);
+                }
+                nextIndex.replace(peer, getLastLogIndex() + 1);
+                matchIndex.replace(peer, getLastLogIndex());
+                successCount++;
             } catch (Exception e) {
                 System.out.println("Node is down");
             }
