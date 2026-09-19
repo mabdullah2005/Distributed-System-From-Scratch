@@ -33,18 +33,9 @@ public class KVServiceImpl extends KVServiceGrpc.KVServiceImplBase{
             return;
         }
 
-
-        String key = request.getKey();
-        String value = request.getValue();
-        String command = key + ":" + value;
-        LogEntry entry = new LogEntry(raftNode.getTerm(), command);
-        raftNode.append(entry);
-
-        raftNode.setCommitIndex(raftNode.getLastLogIndex());
-
-        response = PutResponse.newBuilder()
-                .setSuccessful(true)
-                .build();
+        String command = request.getKey() + ":" + request.getValue();
+        boolean success = raftNode.replicateLog(command);
+        response = PutResponse.newBuilder().setSuccessful(success).build();
 
         streamObserver.onNext(response);
         streamObserver.onCompleted();
@@ -77,51 +68,7 @@ public class KVServiceImpl extends KVServiceGrpc.KVServiceImplBase{
     @Override
     public void appendEntries(AppendEntriesRequest request,
                               StreamObserver<AppendEntriesResponse> streamObserver){
-        AppendEntriesResponse response;
-        int requestTerm = request.getTerm();
-        int raftTerm = raftNode.getTerm();
-
-        if(requestTerm < raftTerm){
-            response = AppendEntriesResponse.newBuilder()
-                    .setTerm(raftTerm)
-                    .setSuccess(false)
-                    .build();
-
-            streamObserver.onNext(response);
-            streamObserver.onCompleted();
-            return;
-        }
-        raftNode.resetElectionTimer();
-        raftNode.updateTerm(requestTerm);
-
-        raftTerm = raftNode.getTerm();
-
-        if(request.getPrevLogIndex() > raftNode.getLastLogIndex()
-                || request.getPrevLogTerm() != raftNode.getLogAtIndex(request.getPrevLogIndex()).term()){
-            response = AppendEntriesResponse.newBuilder()
-                    .setTerm(raftTerm)
-                    .setSuccess(false)
-                    .build();
-
-            streamObserver.onNext(response);
-            streamObserver.onCompleted();
-            return;
-        }
-
-        raftNode.truncateLogFromIndex(request.getPrevLogIndex());
-        for(String entry: request.getEntriesList()){
-            raftNode.append(new LogEntry(raftTerm, entry));
-        }
-
-        if(request.getLeaderCommitIndex() != raftNode.getCommitIndex()){
-            int newIndex = Math.min(request.getLeaderCommitIndex(), raftNode.getLastLogIndex());
-            raftNode.setCommitIndex(newIndex);
-        }
-
-        response = AppendEntriesResponse.newBuilder()
-                .setTerm(raftTerm)
-                .setSuccess(true)
-                .build();
+        AppendEntriesResponse response = raftNode.handleAppendEntry(request);
 
         streamObserver.onNext(response);
         streamObserver.onCompleted();

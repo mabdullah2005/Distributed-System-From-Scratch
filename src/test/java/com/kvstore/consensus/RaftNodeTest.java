@@ -4,7 +4,6 @@ import com.kvstore.grpc.AppendEntriesRequest;
 import com.kvstore.grpc.AppendEntriesResponse;
 import com.kvstore.grpc.RequestVoteRequest;
 import com.kvstore.grpc.RequestVoteResponse;
-import com.kvstore.network.GrpcRaftClient;
 import com.kvstore.network.RaftRpcClient;
 import com.kvstore.storage.MemTable;
 import com.kvstore.storage.StorageEngine;
@@ -148,5 +147,134 @@ public class RaftNodeTest {
         RequestVoteResponse response2 = node.handleVoteRequest(request2);
         assertTrue(response2.getVoteGranted());
         assertEquals(2, node.getTerm());
+    }
+
+    @Test
+    void quorum_succeeded(){
+        RaftRpcClient client = new RaftRpcClient(){
+            @Override
+            public AppendEntriesResponse sendAppendEntries(AppendEntriesRequest request) {
+                return AppendEntriesResponse.newBuilder()
+                        .setSuccess(true)
+                        .build();
+            }
+
+            @Override
+            public RequestVoteResponse sendRequestVote(RequestVoteRequest request) {
+                return null;
+            }
+        };
+
+        RaftRpcClient client2 = new RaftRpcClient(){
+            @Override
+            public AppendEntriesResponse sendAppendEntries(AppendEntriesRequest request) {
+                return AppendEntriesResponse.newBuilder()
+                        .setSuccess(false)
+                        .build();
+            }
+
+            @Override
+            public RequestVoteResponse sendRequestVote(RequestVoteRequest request) {
+                return null;
+            }
+        };
+
+        RaftNode raftNode = new RaftNode(
+                storageEngine,
+                myPort,
+                Arrays.asList(client, client2));
+
+        raftNode.becomeLeader();
+        boolean result = raftNode.replicateLog("1:abc");
+
+        assertTrue(result);
+        assertEquals(1, raftNode.getCommitIndex());
+        assertEquals("abc", storageEngine.get("1"));
+    }
+
+    @Test
+    void quorum_failed(){
+        RaftRpcClient client = new RaftRpcClient(){
+            @Override
+            public AppendEntriesResponse sendAppendEntries(AppendEntriesRequest request) {
+                return AppendEntriesResponse.newBuilder()
+                        .setSuccess(false)
+                        .build();
+            }
+
+            @Override
+            public RequestVoteResponse sendRequestVote(RequestVoteRequest request) {
+                return null;
+            }
+        };
+
+        RaftRpcClient client2 = new RaftRpcClient(){
+            @Override
+            public AppendEntriesResponse sendAppendEntries(AppendEntriesRequest request) {
+                return AppendEntriesResponse.newBuilder()
+                        .setSuccess(false)
+                        .build();
+            }
+
+            @Override
+            public RequestVoteResponse sendRequestVote(RequestVoteRequest request) {
+                return null;
+            }
+        };
+
+        RaftNode raftNode = new RaftNode(
+                storageEngine,
+                myPort,
+                Arrays.asList(client, client2));
+
+        raftNode.becomeLeader();
+        boolean result = raftNode.replicateLog("1:abc");
+
+        assertFalse(result);
+        assertEquals(0, raftNode.getCommitIndex());
+        assertNull(storageEngine.get("1"));
+    }
+
+    @Test
+    void non_leader_log_replication(){
+        RaftRpcClient client = new RaftRpcClient(){
+            @Override
+            public AppendEntriesResponse sendAppendEntries(AppendEntriesRequest request) {
+                return AppendEntriesResponse.newBuilder()
+                        .setSuccess(false)
+                        .build();
+            }
+
+            @Override
+            public RequestVoteResponse sendRequestVote(RequestVoteRequest request) {
+                return null;
+            }
+        };
+
+        RaftRpcClient client2 = new RaftRpcClient(){
+            @Override
+            public AppendEntriesResponse sendAppendEntries(AppendEntriesRequest request) {
+                return AppendEntriesResponse.newBuilder()
+                        .setSuccess(false)
+                        .build();
+            }
+
+            @Override
+            public RequestVoteResponse sendRequestVote(RequestVoteRequest request) {
+                return null;
+            }
+        };
+
+        RaftNode raftNode = new RaftNode(
+                storageEngine,
+                myPort,
+                Arrays.asList(client, client2));
+
+        assertEquals(NodeState.FOLLOWER, raftNode.getState());
+        boolean result = raftNode.replicateLog("1:abc");
+
+        assertFalse(result);
+        assertEquals(0, raftNode.getLastLogIndex());
+        assertEquals(0, raftNode.getCommitIndex());
     }
 }
