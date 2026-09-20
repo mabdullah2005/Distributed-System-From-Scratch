@@ -257,33 +257,49 @@ public class RaftNode {
                 }
 
                 while(!response.getSuccess()){
-                    Integer newValue = nextIndex.get(peer) - 1;
-                    nextIndex.replace(peer, newValue);
+                    if(response.getTerm() > getTerm()){
+                        state = NodeState.FOLLOWER;
+                        updateTerm(response.getTerm());
+                        resetElectionTimer();
 
-                    List<String> entries = new ArrayList<>();
-                    int index = newValue;
-
-                    while(index <= getLastLogIndex()){
-                        if(index != 0) {
-                            entries.add(raftLog.get(index).command());
-                        }
-                        index++;
+                        return false;
                     }
 
-                    request = AppendEntriesRequest.newBuilder()
+                    int currentNext = nextIndex.get(peer);
+                    if(currentNext <= 1){
+                        break;
+                    }
+
+                    int newNext = currentNext - 1;
+                    nextIndex.replace(peer, newNext);
+                    int prevIndex = newNext - 1;
+                    int prevTerm = getLogAtIndex(prevIndex).term();
+
+                    List<String> entries = new ArrayList<>();
+                    for(int i = newNext; i <= getLastLogIndex(); i++){
+                        entries.add(getLogAtIndex(i).command());
+                    }
+
+                    AppendEntriesRequest retryRequest = AppendEntriesRequest.newBuilder()
                             .setTerm(getTerm())
                             .setLeaderId("port" + getPort())
-                            .setPrevLogIndex(newValue)
-                            .setPrevLogTerm(getLogAtIndex(newValue).term())
+                            .setPrevLogIndex(prevIndex)
+                            .setPrevLogTerm(prevTerm)
                             .addAllEntries(entries)
                             .setLeaderCommitIndex(getCommitIndex())
                             .build();
 
-                    response = peer.sendAppendEntries(request);
+                    response = peer.sendAppendEntries(retryRequest);
+                    if(response == null){
+                        break;
+                    }
                 }
-                nextIndex.replace(peer, getLastLogIndex() + 1);
-                matchIndex.replace(peer, getLastLogIndex());
-                successCount++;
+
+                if(response != null && response.getSuccess()) {
+                    nextIndex.replace(peer, getLastLogIndex() + 1);
+                    matchIndex.replace(peer, getLastLogIndex());
+                    successCount++;
+                }
             } catch (Exception e) {
                 System.out.println("Node is down");
             }
