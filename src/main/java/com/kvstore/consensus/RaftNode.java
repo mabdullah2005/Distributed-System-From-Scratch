@@ -314,20 +314,29 @@ public class RaftNode {
             RequestVoteRequest request = RequestVoteRequest.newBuilder()
                     .setTerm(term)
                     .setCandidateId(id)
+                    .setLastLogTerm(raftLog.getLastTerm())
+                    .setLastLogIndex(raftLog.getLastIndex())
                     .build();
 
             try{
                 RequestVoteResponse response = client.sendRequestVote(request);
 
-                if(response != null && response.getVoteGranted()){
-                    voteCount++;
+                if(response != null){
+                    if(response.getTerm() > getTerm()){
+                        stepDown(response.getTerm());
+                        return;
+                    }
+
+                    if(response.getVoteGranted()){
+                        voteCount++;
+                    }
                 }
             } catch(Exception e){
                 System.out.println("Error: Port is not alive");
             }
         }
 
-        if(hasQuorum(voteCount)){
+        if(hasQuorum(voteCount) && getState() == NodeState.CANDIDATE){
             becomeLeader();
         }
     }
