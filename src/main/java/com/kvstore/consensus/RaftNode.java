@@ -2,13 +2,12 @@ package com.kvstore.consensus;
 
 import com.kvstore.grpc.*;
 import com.kvstore.network.RaftRpcClient;
-import com.kvstore.storage.StorageEngine;
+import com.kvstore.storage.StateMachine;
 
 import java.io.IOException;
 import java.util.HashMap;
 import java.util.concurrent.*;
 import java.util.List;
-import java.util.ArrayList;
 
 public class RaftNode {
     public enum NodeState{
@@ -17,13 +16,14 @@ public class RaftNode {
         LEADER
     };
 
+    private String id;
     private int term;
     private NodeState state;
     private int commitIndex;
     private int lastApplied;
-    private StorageEngine engine;
-    private List<LogEntry> raftLog;
     private String votedFor;
+    private StateMachine stateMachine;
+    private RaftLog raftLog;
 
     private final Integer myPort;
     private List<RaftRpcClient> peerPorts;
@@ -32,11 +32,13 @@ public class RaftNode {
 
     private ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
     private ScheduledFuture<?> currentTimer;
+    private ScheduledFuture<?> heartbeatScheduler;
 
     private static final int MIN_TIMER = 150;
     private static final int MAX_TIMER = 300;
 
-    public RaftNode(StorageEngine engine, Integer myPort, List<RaftRpcClient> peerPorts){
+    public RaftNode(StateMachine stateMachine, Integer myPort, List<RaftRpcClient> peerPorts){
+        this.id = "Port" + myPort;
         this.term = 0;
         this.state = NodeState.FOLLOWER;
         this.commitIndex = 0;
@@ -44,19 +46,14 @@ public class RaftNode {
 
         this.myPort = myPort;
         this.peerPorts = peerPorts;
-        this.engine = engine;
+        this.stateMachine = stateMachine;
 
-        this.raftLog = new ArrayList<>();
+        this.raftLog = new RaftLog();
         this.votedFor = null;
-        raftLog.add(new LogEntry(0, "dummy"));
 
         currentTimer = this.scheduler.schedule(this::startElection,
                 ThreadLocalRandom.current().nextInt(MIN_TIMER, MAX_TIMER),
                 TimeUnit.MILLISECONDS);
-    }
-
-    public Integer getPort(){
-        return myPort;
     }
 
     public synchronized int getTerm(){
@@ -79,12 +76,85 @@ public class RaftNode {
         }
     }
 
+    public synchronized int getLastLogIndex(){
+        return raftLog.getLastIndex();
+    }
+
+    public synchronized LogEntry getLogAtIndex(int index){
+        return raftLog.getEntry(index);
+    }
+
+    public synchronized void truncateLogFromIndex(int index){
+        raftLog.truncateFromIndex(index);
+    }
+
+    public synchronized void append(LogEntry entry){
+        raftLog.append(entry);
+    }
+
+    public synchronized void setCommitIndex(int newIndex){
+        commitIndex = newIndex;
+        applyCommittedLogs();
+    }
+
+    public synchronized void applyCommittedLogs(){
+        while(commitIndex > lastApplied){
+            lastApplied++;
+
+            String command = getLogAtIndex(lastApplied).command();
+
+            try{
+                stateMachine.apply(command);
+            } catch(IOException e){
+                e.printStackTrace();
+            }
+        }
+    }
+
+    private AppendEntriesRequest buildAppendRequest(int index){
+        return AppendEntriesRequest.newBuilder()
+                .setTerm(getTerm())
+                .setLeaderId(id)
+                .setPrevLogIndex(index - 1)
+                .setPrevLogTerm(raftLog.getEntry(index - 1).term())
+                .addAllEntries(raftLog.getCommandsFrom(index))
+                .setLeaderCommitIndex(getCommitIndex())
+                .build();
+    }
+
+    private synchronized boolean hasQuorum(int count){
+        int majority = ((peerPorts.size() + 1)/2) + 1;
+        return count >= majority;
+    }
+
+    /*
+    * Election Methods
+    * */
+
+    public void stepDown(int newTerm){
+        updateTerm(newTerm);
+        state = NodeState.FOLLOWER;
+        resetElectionTimer();
+
+        if(heartbeatScheduler != null){
+            heartbeatScheduler.cancel(false);
+        }
+    }
+
+    public synchronized void resetElectionTimer(){
+        currentTimer.cancel(false);
+
+        currentTimer = this.scheduler.schedule(this::startElection,
+                ThreadLocalRandom.current().nextInt(MIN_TIMER, MAX_TIMER),
+                TimeUnit.MILLISECONDS);
+    }
+
     public void startElection(){
         synchronized(this){
             resetElectionTimer();
             term++;
             state = NodeState.CANDIDATE;
-            votedFor = "Node" + myPort;
+            votedFor = id;
             System.out.println("Timer expired! Starting election for Term " + term);
         }
 
@@ -104,59 +174,16 @@ public class RaftNode {
         }
 
         currentTimer.cancel(false);
-        ScheduledFuture<?> heartbeatScheduler = scheduler.scheduleAtFixedRate(
+        heartbeatScheduler = scheduler.scheduleAtFixedRate(
                 this::heartBeat,
                 0,
                 50,
                 TimeUnit.MILLISECONDS);
     }
 
-    public synchronized void resetElectionTimer(){
-        currentTimer.cancel(false);
-
-        currentTimer = this.scheduler.schedule(this::startElection,
-                ThreadLocalRandom.current().nextInt(MIN_TIMER, MAX_TIMER),
-                TimeUnit.MILLISECONDS);
-    }
-
-    public synchronized int getLastLogIndex(){
-        return raftLog.size() - 1;
-    }
-
-    public synchronized LogEntry getLogAtIndex(int index){
-        return raftLog.get(index);
-    }
-
-    public synchronized void truncateLogFromIndex(int index){
-        raftLog.subList(index + 1, raftLog.size()).clear();
-    }
-
-    public synchronized void append(LogEntry entry){
-        raftLog.add(entry);
-    }
-
-    public synchronized void setCommitIndex(int newIndex){
-        commitIndex = newIndex;
-        applyCommittedLogs();
-    }
-
-    public synchronized void applyCommittedLogs(){
-        while(commitIndex > lastApplied){
-            lastApplied++;
-
-            String command = getLogAtIndex(lastApplied).command();
-
-            String[] split = command.split(":");
-            String key = split[0];
-            String value = split[1];
-
-            try{
-                engine.put(key, value);
-            } catch(IOException e){
-                e.printStackTrace();
-            }
-        }
-    }
+    /*
+        Methods that followers are called by leaders
+     */
 
     public synchronized AppendEntriesResponse handleAppendEntry(AppendEntriesRequest request){
         int requestTerm = request.getTerm();
@@ -164,19 +191,12 @@ public class RaftNode {
         int leaderCommitIndex = request.getLeaderCommitIndex();
 
         if(requestTerm >= getTerm()){
-            updateTerm(requestTerm);
-            state = NodeState.FOLLOWER;
-            resetElectionTimer();
+            stepDown(requestTerm);
 
-            if(requestPrevIndex <= getLastLogIndex() &&
-                    request.getPrevLogTerm() == getLogAtIndex(requestPrevIndex).term()){
-
+            if(raftLog.hasMatchingEntry(requestPrevIndex, request.getPrevLogTerm())){
                 truncateLogFromIndex(requestPrevIndex);
 
-                for(String command: request.getEntriesList()){
-                    LogEntry entry = new LogEntry(getTerm(), command);
-                    append(entry);
-                }
+                raftLog.appendAll(getTerm(), request.getEntriesList());
 
                 if(getCommitIndex() < leaderCommitIndex){
                     setCommitIndex(Math.min(leaderCommitIndex, getLastLogIndex()));
@@ -199,17 +219,12 @@ public class RaftNode {
     public synchronized RequestVoteResponse handleVoteRequest(RequestVoteRequest request){
         String candidateID = request.getCandidateId();
         int requestTerm = request.getTerm();
-        int requestLastLogTerm = request.getLastLogTerm();
-        int requestLastLogIndex = request.getLastLogIndex();
         int myTerm = getTerm();
-        int myLastLogIndex = getLastLogIndex();
-        int myLastLogTerm = getLogAtIndex(myLastLogIndex).term();
 
         if(requestTerm >= myTerm){
             updateTerm(requestTerm);
             if(votedFor == null || votedFor.equals(candidateID)){
-                if(requestLastLogTerm > myLastLogTerm ||
-                        (requestLastLogTerm == myLastLogTerm && requestLastLogIndex >= myLastLogIndex)){
+                if(raftLog.isUpToDate(request.getLastLogIndex(), request.getLastLogTerm())){
 
                     resetElectionTimer();
                     votedFor = candidateID;
@@ -228,6 +243,10 @@ public class RaftNode {
                 .build();
     }
 
+    /*
+        Methods leaders call
+     */
+
     public synchronized boolean replicateLog(String command){
         if(getState() != NodeState.LEADER){
             return false;
@@ -235,17 +254,8 @@ public class RaftNode {
         LogEntry entry = new LogEntry(getTerm(), command);
         append(entry);
         int entryIndex = getLastLogIndex();
-        int lastLogIndex = entryIndex - 1;
-        int lastLogTerm = getLogAtIndex(lastLogIndex).term();
 
-        AppendEntriesRequest request = AppendEntriesRequest.newBuilder()
-                .setTerm(getTerm())
-                .setLeaderId("port" + getPort())
-                .setPrevLogIndex(lastLogIndex)
-                .setPrevLogTerm(lastLogTerm)
-                .addEntries(command)
-                .setLeaderCommitIndex(getCommitIndex())
-                .build();
+        AppendEntriesRequest request = buildAppendRequest(entryIndex);
 
         int successCount = 1;
         for(RaftRpcClient peer: peerPorts){
@@ -258,10 +268,7 @@ public class RaftNode {
 
                 while(!response.getSuccess()){
                     if(response.getTerm() > getTerm()){
-                        state = NodeState.FOLLOWER;
-                        updateTerm(response.getTerm());
-                        resetElectionTimer();
-
+                        stepDown(response.getTerm());
                         return false;
                     }
 
@@ -272,22 +279,7 @@ public class RaftNode {
 
                     int newNext = currentNext - 1;
                     nextIndex.replace(peer, newNext);
-                    int prevIndex = newNext - 1;
-                    int prevTerm = getLogAtIndex(prevIndex).term();
-
-                    List<String> entries = new ArrayList<>();
-                    for(int i = newNext; i <= getLastLogIndex(); i++){
-                        entries.add(getLogAtIndex(i).command());
-                    }
-
-                    AppendEntriesRequest retryRequest = AppendEntriesRequest.newBuilder()
-                            .setTerm(getTerm())
-                            .setLeaderId("port" + getPort())
-                            .setPrevLogIndex(prevIndex)
-                            .setPrevLogTerm(prevTerm)
-                            .addAllEntries(entries)
-                            .setLeaderCommitIndex(getCommitIndex())
-                            .build();
+                    AppendEntriesRequest retryRequest = buildAppendRequest(newNext);
 
                     response = peer.sendAppendEntries(retryRequest);
                     if(response == null){
@@ -305,8 +297,7 @@ public class RaftNode {
             }
         }
 
-        int majority = ((peerPorts.size() + 1)/2) + 1;
-        if(successCount >= majority){
+        if(hasQuorum(successCount)){
             setCommitIndex(entryIndex);
             applyCommittedLogs();
 
@@ -322,7 +313,7 @@ public class RaftNode {
         for(RaftRpcClient client : peerPorts){
             RequestVoteRequest request = RequestVoteRequest.newBuilder()
                     .setTerm(term)
-                    .setCandidateId("Port" + myPort)
+                    .setCandidateId(id)
                     .build();
 
             try{
@@ -336,9 +327,7 @@ public class RaftNode {
             }
         }
 
-        int majority = ((peerPorts.size() + 1) / 2) + 1;
-
-        if(voteCount >= majority){
+        if(hasQuorum(voteCount)){
             becomeLeader();
         }
     }
@@ -348,13 +337,7 @@ public class RaftNode {
             return;
         }
 
-        AppendEntriesRequest request = AppendEntriesRequest.newBuilder()
-                .setTerm(getTerm())
-                .setLeaderId("port" + getPort())
-                .setPrevLogTerm(getLogAtIndex(getLastLogIndex()).term())
-                .setPrevLogIndex(getLastLogIndex())
-                .setLeaderCommitIndex(getCommitIndex())
-                .build();
+        AppendEntriesRequest request = buildAppendRequest(getLastLogIndex() + 1);
 
         for(RaftRpcClient peer: peerPorts){
             try{

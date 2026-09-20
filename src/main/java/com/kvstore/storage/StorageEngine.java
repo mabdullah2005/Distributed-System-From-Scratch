@@ -6,7 +6,7 @@ import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 import java.util.List;
 
-public class StorageEngine {
+public class StorageEngine implements StateMachine{
     private volatile MemTable activeTable;
     private List<MemTable> immutableTables;
     private List<SSTable> ssTables;
@@ -83,6 +83,18 @@ public class StorageEngine {
             activeTable = new MemTable();
         }finally{
             lock.writeLock().unlock();
+        }
+    }
+
+    @Override
+    public void apply(String command) throws IOException{
+        if(command == null){
+            return;
+        }
+
+        String[] splitted = command.split(":", 2);
+        if(splitted.length == 2){
+            put(splitted[0], splitted[1]);
         }
     }
 }
