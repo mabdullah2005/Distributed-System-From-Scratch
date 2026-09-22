@@ -12,8 +12,10 @@ import static org.junit.jupiter.api.Assertions.*;
 import org.junit.jupiter.api.BeforeEach;
 
 import com.kvstore.consensus.RaftNode.NodeState;
+import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -23,10 +25,15 @@ public class RaftNodeTest {
     private StorageEngine storageEngine;
     private final Integer myPort = 8081;
     private RaftRpcClient rpcClient;
-    private String walPath = "_wal.log";
+
+    @TempDir
+    private Path tempDir;
+    private String walPath;
 
     @BeforeEach
     void setUp() throws IOException {
+        walPath = tempDir.resolve("_wal.log").toString();
+
         storageEngine = new StorageEngine(new MemTable(), walPath);
         rpcClient = new RaftRpcClient() {
             @Override

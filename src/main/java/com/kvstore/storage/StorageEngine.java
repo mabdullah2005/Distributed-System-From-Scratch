@@ -13,6 +13,8 @@ public class StorageEngine implements StateMachine{
     private WriteAheadLog wal;
     private ReentrantReadWriteLock lock;
 
+    public static final String TOMBSTONE = "__TOMBSTONE__";
+
     public StorageEngine(MemTable memTable, String walPath) throws IOException {
         this.activeTable = memTable;
         immutableTables = new ArrayList<>();
@@ -20,6 +22,8 @@ public class StorageEngine implements StateMachine{
 
         wal = new WriteAheadLog(walPath);
         lock = new ReentrantReadWriteLock();
+
+        recoverFromWal();
     }
 
     public void put(String key, String value) throws IOException{
@@ -32,7 +36,18 @@ public class StorageEngine implements StateMachine{
             lock.readLock().unlock();
         }
 
-        checkAndTriggerFlush();
+        flush();
+    }
+
+    public void delete(String key) throws IOException{
+        lock.readLock().lock();
+
+        try{
+            wal.append("DEL", key, TOMBSTONE);
+            activeTable.put(key, TOMBSTONE);
+        } finally {
+            lock.readLock().unlock();
+        }
     }
 
     public String get(String key){
@@ -40,40 +55,48 @@ public class StorageEngine implements StateMachine{
 
         try{
             String value = activeTable.get(key);
-            if(value == null){
-                for(int i = immutableTables.size() - 1; i>=0; i--){
+            if(value == null) {
+                for (int i = immutableTables.size() - 1; i >= 0; i--) {
                     MemTable table = immutableTables.get(i);
                     value = table.get(key);
 
                     if(value != null){
-                        return value;
+                        break;
                     }
                 }
-
+            }
+            if(value == null){
                 for(int i = ssTables.size() - 1; i>=0; i--){
                     SSTable table = ssTables.get(i);
                     value = table.get(key);
 
                     if(value != null){
-                        return value;
+                        break;
                     }
                 }
             }
 
+            if(value == null || value.equals(TOMBSTONE)){
+                return null;
+            }
             return value;
         }finally{
             lock.readLock().unlock();
         }
     }
 
-    public void checkAndTriggerFlush(){
-        if(activeTable.getTable().size() < 100){
+    public boolean checkFlush(){
+        return activeTable.getTable().size() < 100;
+    }
+
+    public void flush() throws IOException{
+        if(checkFlush()){
             return;
         }
 
         lock.writeLock().lock();
         try{
-            if(activeTable.getTable().size() < 100){
+            if(checkFlush()){
                 return;
             }
 
@@ -81,8 +104,37 @@ public class StorageEngine implements StateMachine{
 
             immutableTables.add(activeTable);
             activeTable = new MemTable();
-        }finally{
+        } finally{
             lock.writeLock().unlock();
+        }
+    }
+
+    public void forceFlush() throws IOException{
+        lock.writeLock().lock();
+        try{
+            System.out.println("MemTable full! Swapping to immutable list...");
+
+            immutableTables.add(activeTable);
+            activeTable = new MemTable();
+        } finally{
+            lock.writeLock().unlock();
+        }
+    }
+
+    public void recoverFromWal() throws IOException {
+        List<String> persistantLogs = wal.readAll();
+
+        for(String log: persistantLogs){
+            if(log == null || log.isBlank()){
+                continue;
+            }
+
+            String[] splitted = log.split("\\|", 3);
+            if(splitted[0].equals("DEL")){
+                activeTable.put(splitted[1], TOMBSTONE);
+            } else if(splitted[0].equals("PUT")){
+                activeTable.put(splitted[1], splitted[2]);
+            }
         }
     }
 
