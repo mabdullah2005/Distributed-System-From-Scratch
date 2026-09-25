@@ -6,6 +6,9 @@ import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
 import java.nio.file.Path;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -57,5 +60,47 @@ public class StorageEngineTest {
 
         assertNull(engine2.get("1"));
         assertEquals("Oscar", engine2.get("2"));
+    }
+
+    @Test
+    void process_put_with_delimiters() throws IOException{
+        engine.put("1|2", "Alice|\n PUT|1|Bob");
+        StorageEngine engine2 = new StorageEngine(new MemTable(), pathFile);
+
+        assertEquals("Alice|\n PUT|1|Bob", engine2.get("1|2"));
+    }
+
+    @Test
+    void concurrent_calls() throws IOException, InterruptedException{
+        ExecutorService executor = Executors.newFixedThreadPool(10);
+        CountDownLatch startGun = new CountDownLatch(1);
+        CountDownLatch doneLatch = new CountDownLatch(10);
+
+        for(int i = 0; i<10; i++){
+            final int id = i;
+
+            executor.submit(() -> {
+                try {
+                    startGun.await();
+
+                    engine.put("Key " + id, "Value " + id);
+                } catch (Exception e) {
+                    throw new RuntimeException(e);
+                } finally{
+                    doneLatch.countDown();
+                }
+            });
+        }
+
+        startGun.countDown();
+        doneLatch.await();
+
+        executor.shutdown();
+
+        StorageEngine engine2 = new StorageEngine(new MemTable(), pathFile);
+
+        for(int i = 0; i<10; i++){
+            assertEquals("Value " + i, engine2.get("Key " + i));
+        }
     }
 }

@@ -1,11 +1,11 @@
 package com.kvstore.storage;
 
+import com.kvstore.grpc.WalRecord;
 import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.*;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.io.TempDir;
 
-import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.nio.file.Path;
 
@@ -25,11 +25,19 @@ public class WriteAheadLogTest {
     @Test
     void Wal_put_and_delete() throws IOException {
         wal.append("PUT", "user1", "Abigail");
-        List<String> logState = wal.readAll();
-        assertEquals("PUT|user1|Abigail", logState.get(0));
+        List<WalRecord> logState = wal.readAll();
+        WalRecord record1 = logState.get(0);
 
-        wal.append("DEL", "user1", "Abigail");
+        assertTrue(record1.getType().equals(WalRecord.OpType.PUT));
+        assertTrue(record1.getKey().equals("user1"));
+        assertTrue(record1.getValue().equals("Abigail"));
+
+        wal.append("DEL", "user1", StorageEngine.TOMBSTONE);
         logState = wal.readAll();
-        assertEquals("DEL|user1|Abigail", logState.get(logState.size() - 1));
+        WalRecord record2 = logState.get(logState.size() - 1);
+
+        assertTrue(record2.getType().equals(WalRecord.OpType.DEL));
+        assertTrue(record2.getKey().equals("user1"));
+        assertTrue(record2.getValue().equals(StorageEngine.TOMBSTONE));
     }
 }

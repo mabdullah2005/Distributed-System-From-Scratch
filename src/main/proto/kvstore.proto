@@ -3,6 +3,17 @@ syntax = "proto3";
 option java_multiple_files = true;
 option java_package="com.kvstore.grpc";
 
+message WalRecord{
+  enum OpType{
+    PUT = 0;
+    DEL = 1;
+  }
+
+  OpType type = 1;
+  string key = 2;
+  string value = 3;
+}
+
 message PutRequest{
   string key = 1;
   string value = 2;

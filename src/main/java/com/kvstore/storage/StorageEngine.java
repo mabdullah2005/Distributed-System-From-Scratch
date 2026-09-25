@@ -1,5 +1,7 @@
 package com.kvstore.storage;
 
+import com.kvstore.grpc.WalRecord;
+
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
@@ -122,18 +124,17 @@ public class StorageEngine implements StateMachine{
     }
 
     public void recoverFromWal() throws IOException {
-        List<String> persistantLogs = wal.readAll();
+        List<WalRecord> persistantLogs = wal.readAll();
 
-        for(String log: persistantLogs){
-            if(log == null || log.isBlank()){
+        for(WalRecord log: persistantLogs){
+            if(log == null){
                 continue;
             }
 
-            String[] splitted = log.split("\\|", 3);
-            if(splitted[0].equals("DEL")){
-                activeTable.put(splitted[1], TOMBSTONE);
-            } else if(splitted[0].equals("PUT")){
-                activeTable.put(splitted[1], splitted[2]);
+            if(log.getType().equals(WalRecord.OpType.DEL)){
+                activeTable.put(log.getKey(), TOMBSTONE);
+            } else if(log.getType().equals(WalRecord.OpType.PUT)){
+                activeTable.put(log.getKey(), log.getValue());
             }
         }
     }
