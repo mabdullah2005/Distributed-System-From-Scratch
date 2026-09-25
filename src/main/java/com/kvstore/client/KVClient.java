@@ -56,9 +56,14 @@ public class KVClient {
 
             try{
                 GetResponse response = stub.get(request);
-                if(response.getFound()){
-                    System.out.println("Success on port: " + port);
-                    return response.getValue();
+                if(response.getSuccessful()){
+                    if(response.getFound()){
+                        System.out.println("Success on port: " + port);
+                        return response.getValue();
+                    } else{
+                        System.out.println("Record does not exist.");
+                        return null;
+                    }
                 }
             } catch (Exception e) {
                 System.out.println("Node" + port + "is down. Retrying...");

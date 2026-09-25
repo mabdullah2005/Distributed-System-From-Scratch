@@ -385,4 +385,125 @@ public class RaftNodeTest {
         assertEquals(0, successfulRequest.getPrevLogIndex());
         assertEquals(Arrays.asList("k1:v1", "k2:v2"), successfulRequest.getEntriesList());
     }
+
+    @Test
+    void linearizable_read_follower_rejects() {
+        assertEquals(NodeState.FOLLOWER, node.getState());
+        assertFalse(node.verifyLeadershipQuorum());
+    }
+
+    @Test
+    void linearizable_read_leader_with_quorum_succeeds() {
+        RaftRpcClient peer1 = new RaftRpcClient() {
+            @Override
+            public AppendEntriesResponse sendAppendEntries(AppendEntriesRequest request) {
+                return AppendEntriesResponse.newBuilder()
+                        .setSuccess(true)
+                        .setTerm(request.getTerm())
+                        .build();
+            }
+
+            @Override
+            public RequestVoteResponse sendRequestVote(RequestVoteRequest request) {
+                return null;
+            }
+        };
+
+        RaftRpcClient peer2 = new RaftRpcClient() {
+            @Override
+            public AppendEntriesResponse sendAppendEntries(AppendEntriesRequest request) {
+                return AppendEntriesResponse.newBuilder()
+                        .setSuccess(true)
+                        .setTerm(request.getTerm())
+                        .build();
+            }
+
+            @Override
+            public RequestVoteResponse sendRequestVote(RequestVoteRequest request) {
+                return null;
+            }
+        };
+
+        RaftNode leader = new RaftNode(storageEngine, myPort, Arrays.asList(peer1, peer2));
+        leader.becomeLeader();
+
+        boolean verified = leader.verifyLeadershipQuorum();
+        assertTrue(verified);
+    }
+
+    @Test
+    void linearizable_read_leader_partitioned_lacks_quorum_fails() {
+        RaftRpcClient unreachablePeer1 = new RaftRpcClient() {
+            @Override
+            public AppendEntriesResponse sendAppendEntries(AppendEntriesRequest request) {
+                return null;
+            }
+
+            @Override
+            public RequestVoteResponse sendRequestVote(RequestVoteRequest request) {
+                return null;
+            }
+        };
+
+        RaftRpcClient unreachablePeer2 = new RaftRpcClient() {
+            @Override
+            public AppendEntriesResponse sendAppendEntries(AppendEntriesRequest request) {
+                throw new RuntimeException("Connection timed out");
+            }
+
+            @Override
+            public RequestVoteResponse sendRequestVote(RequestVoteRequest request) {
+                return null;
+            }
+        };
+
+        RaftNode partitionedLeader = new RaftNode(storageEngine, myPort, Arrays.asList(unreachablePeer1, unreachablePeer2));
+        partitionedLeader.becomeLeader();
+
+        boolean verified = partitionedLeader.verifyLeadershipQuorum();
+        assertFalse(verified);
+    }
+
+    @Test
+    void linearizable_read_leader_deposed_by_higher_term_steps_down() {
+        RaftRpcClient higherTermPeer = new RaftRpcClient() {
+            @Override
+            public AppendEntriesResponse sendAppendEntries(AppendEntriesRequest request) {
+                return AppendEntriesResponse.newBuilder()
+                        .setSuccess(false)
+                        .setTerm(request.getTerm() + 2)
+                        .build();
+            }
+
+            @Override
+            public RequestVoteResponse sendRequestVote(RequestVoteRequest request) {
+                return null;
+            }
+        };
+
+        RaftRpcClient normalPeer = new RaftRpcClient() {
+            @Override
+            public AppendEntriesResponse sendAppendEntries(AppendEntriesRequest request) {
+                return AppendEntriesResponse.newBuilder()
+                        .setSuccess(true)
+                        .setTerm(request.getTerm())
+                        .build();
+            }
+
+            @Override
+            public RequestVoteResponse sendRequestVote(RequestVoteRequest request) {
+                return null;
+            }
+        };
+
+        RaftNode leader = new RaftNode(storageEngine, myPort, Arrays.asList(higherTermPeer, normalPeer));
+        leader.becomeLeader();
+        int initialTerm = leader.getTerm();
+
+        boolean verified = leader.verifyLeadershipQuorum();
+
+        assertFalse(verified);
+        assertEquals(NodeState.FOLLOWER, leader.getState());
+        assertEquals(initialTerm + 2, leader.getTerm());
+    }
 }

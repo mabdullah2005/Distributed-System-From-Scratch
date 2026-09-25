@@ -44,22 +44,7 @@ public class KVServiceImpl extends KVServiceGrpc.KVServiceImplBase{
     @Override
     public void get(GetRequest request,
                     StreamObserver<GetResponse> streamObserver){
-        String key = request.getKey();
-        String value = engine.get(key);
-
-        GetResponse response;
-
-        if(value != null){
-            response = GetResponse.newBuilder()
-                    .setValue(value)
-                    .setFound(true)
-                    .build();
-        }else{
-            response = GetResponse.newBuilder()
-                    .setValue("")
-                    .setFound(false)
-                    .build();
-        }
+        GetResponse response = raftNode.get(request.getKey());
 
         streamObserver.onNext(response);
         streamObserver.onCompleted();

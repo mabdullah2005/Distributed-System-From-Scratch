@@ -28,8 +28,9 @@ message GetRequest{
 }
 
 message GetResponse{
-  string value = 1;
-  bool found = 2;
+  bool successful = 1;
+  string value = 2;
+  bool found = 3;
 }
 
 message AppendEntriesRequest{

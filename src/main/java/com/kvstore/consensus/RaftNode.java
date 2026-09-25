@@ -247,6 +247,63 @@ public class RaftNode {
         Methods leaders call
      */
 
+    public synchronized boolean verifyLeadershipQuorum(){
+        if(getState() != NodeState.LEADER){
+            return false;
+        }
+
+        AppendEntriesRequest request = buildAppendRequest(getLastLogIndex() + 1);
+        int successCount = 1;
+
+
+        for(RaftRpcClient peer: peerPorts){
+            try{
+                AppendEntriesResponse response = peer.sendAppendEntries(request);
+
+                if(response != null){
+                    if(response.getTerm() > getTerm()){
+                        stepDown(response.getTerm());
+                        return false;
+                    }
+                    if(response.getSuccess()){
+                        successCount++;
+                    }
+                }
+            } catch (Exception e) {
+                System.out.println("Node is not alive");
+            }
+        }
+
+        if(!hasQuorum(successCount)){
+            return false;
+        }
+
+        return true;
+    }
+
+    public synchronized GetResponse get(String key){
+        if(!verifyLeadershipQuorum()){
+            return GetResponse.newBuilder()
+                    .setSuccessful(false)
+                    .build();
+        }
+
+        String value = stateMachine.get(key);
+
+        if(value == null || value.isBlank()){
+            return GetResponse.newBuilder()
+                    .setSuccessful(true)
+                    .setFound(false)
+                    .build();
+        }
+
+        return GetResponse.newBuilder()
+                .setSuccessful(true)
+                .setFound(true)
+                .setValue(value)
+                .build();
+    }
+
     public synchronized boolean replicateLog(String command){
         if(getState() != NodeState.LEADER){
             return false;
