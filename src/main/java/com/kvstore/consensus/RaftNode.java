@@ -7,8 +7,8 @@ import com.kvstore.storage.StateMachine;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Paths;
-import java.util.HashMap;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.List;
 
 public class RaftNode {
@@ -30,10 +30,11 @@ public class RaftNode {
 
     private final Integer myPort;
     private List<RaftRpcClient> peerPorts;
-    private HashMap<RaftRpcClient, Integer> nextIndex;
-    private HashMap<RaftRpcClient, Integer> matchIndex;
+    private ConcurrentHashMap<RaftRpcClient, Integer> nextIndex;
+    private ConcurrentHashMap<RaftRpcClient, Integer> matchIndex;
 
     private ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
+    private final ExecutorService rpcExecutor = Executors.newCachedThreadPool();
     private ScheduledFuture<?> currentTimer;
     private ScheduledFuture<?> heartbeatScheduler;
 
@@ -202,8 +203,8 @@ public class RaftNode {
         System.out.println("\n👑 I WON! I AM THE LEADER FOR TERM " + term + "!");
         state = NodeState.LEADER;
 
-        nextIndex = new HashMap<>();
-        matchIndex = new HashMap<>();
+        nextIndex = new ConcurrentHashMap<>();
+        matchIndex = new ConcurrentHashMap<>();
 
         for(RaftRpcClient peer: peerPorts){
             nextIndex.put(peer, getLastLogIndex()+1);
@@ -284,41 +285,53 @@ public class RaftNode {
         Methods leaders call
      */
 
-    public synchronized boolean verifyLeadershipQuorum(){
+    public boolean verifyLeadershipQuorum(){
         if(getState() != NodeState.LEADER){
             return false;
         }
 
         AppendEntriesRequest request = buildAppendRequest(getLastLogIndex() + 1);
-        int successCount = 1;
 
+        int majority = ((peerPorts.size() + 1) / 2) + 1;
+        CountDownLatch quorumLatch = new CountDownLatch(majority - 1);
+        AtomicInteger successCount = new AtomicInteger(1);
 
-        for(RaftRpcClient peer: peerPorts){
-            try{
-                AppendEntriesResponse response = peer.sendAppendEntries(request);
+        for (RaftRpcClient peer : peerPorts) {
+            rpcExecutor.submit(() -> {
+                try {
+                    AppendEntriesResponse response = peer.sendAppendEntries(request);
 
-                if(response != null){
-                    if(response.getTerm() > getTerm()){
-                        stepDown(response.getTerm());
-                        return false;
+                    if (response != null) {
+                        if (response.getTerm() > getTerm()) {
+                            stepDown(response.getTerm());
+                            return;
+                        }
+                        if (response.getSuccess()) {
+                            successCount.incrementAndGet();
+                            quorumLatch.countDown();
+                        }
                     }
-                    if(response.getSuccess()){
-                        successCount++;
-                    }
+                } catch (Exception e) {
+                    System.out.println("Node is not alive");
                 }
-            } catch (Exception e) {
-                System.out.println("Node is not alive");
-            }
+            });
         }
 
-        if(!hasQuorum(successCount)){
+        try {
+            quorumLatch.await(1000, TimeUnit.MILLISECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
             return false;
         }
 
-        return true;
+        if (getState() != NodeState.LEADER) {
+            return false;
+        }
+
+        return hasQuorum(successCount.get());
     }
 
-    public synchronized GetResponse get(String key){
+    public GetResponse get(String key){
         if(!verifyLeadershipQuorum()){
             return GetResponse.newBuilder()
                     .setSuccessful(false)
@@ -341,60 +354,80 @@ public class RaftNode {
                 .build();
     }
 
-    public synchronized boolean replicateLog(String command){
+
+    public boolean replicateLog(String command){
+        int entryIndex;
+
         if(getState() != NodeState.LEADER){
             return false;
         }
-        LogEntry entry = new LogEntry(getTerm(), command);
-        append(entry);
-        int entryIndex = getLastLogIndex();
+
+        synchronized(this){
+            LogEntry entry = new LogEntry(getTerm(), command);
+            append(entry);
+            entryIndex = getLastLogIndex();
+        }
 
         AppendEntriesRequest request = buildAppendRequest(entryIndex);
 
-        int successCount = 1;
-        for(RaftRpcClient peer: peerPorts){
-            try{
-                AppendEntriesResponse response = peer.sendAppendEntries(request);
+        int majority = ((peerPorts.size() + 1) / 2) + 1;
+        CountDownLatch quorumLatch = new CountDownLatch(majority - 1);
+        AtomicInteger successCount = new AtomicInteger(1);
 
-                if(response == null){
-                    continue;
-                }
+        for (RaftRpcClient peer : peerPorts) {
+            rpcExecutor.submit(() -> {
+                try {
+                    AppendEntriesResponse response = peer.sendAppendEntries(request);
 
-                while(!response.getSuccess()){
-                    if(response.getTerm() > getTerm()){
-                        stepDown(response.getTerm());
-                        return false;
+                    if (response == null) {
+                        return;
                     }
 
-                    int currentNext = nextIndex.get(peer);
-                    if(currentNext <= 1){
-                        break;
+                    while (!response.getSuccess()) {
+                        if (response.getTerm() > getTerm()) {
+                            stepDown(response.getTerm());
+                            return;
+                        }
+
+                        Integer currentNext = nextIndex != null ? nextIndex.get(peer) : null;
+                        if (currentNext == null) {
+                            currentNext = entryIndex;
+                        }
+                        if (currentNext <= 1) {
+                            break;
+                        }
+
+                        int newNext = currentNext - 1;
+                        nextIndex.replace(peer, newNext);
+                        AppendEntriesRequest retryRequest = buildAppendRequest(newNext);
+
+                        response = peer.sendAppendEntries(retryRequest);
+                        if (response == null) {
+                            break;
+                        }
                     }
 
-                    int newNext = currentNext - 1;
-                    nextIndex.replace(peer, newNext);
-                    AppendEntriesRequest retryRequest = buildAppendRequest(newNext);
-
-                    response = peer.sendAppendEntries(retryRequest);
-                    if(response == null){
-                        break;
+                    if (response != null && response.getSuccess()) {
+                        nextIndex.replace(peer, getLastLogIndex() + 1);
+                        matchIndex.replace(peer, getLastLogIndex());
+                        successCount.incrementAndGet();
+                        quorumLatch.countDown();
                     }
+                } catch (Exception e) {
+                    System.out.println("Node is down");
                 }
-
-                if(response != null && response.getSuccess()) {
-                    nextIndex.replace(peer, getLastLogIndex() + 1);
-                    matchIndex.replace(peer, getLastLogIndex());
-                    successCount++;
-                }
-            } catch (Exception e) {
-                System.out.println("Node is down");
-            }
+            });
         }
 
-        if(hasQuorum(successCount)){
-            setCommitIndex(entryIndex);
-            applyCommittedLogs();
+        try {
+            quorumLatch.await(1000, TimeUnit.MILLISECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return false;
+        }
 
+        if (hasQuorum(successCount.get())) {
+            setCommitIndex(entryIndex);
             return true;
         }
 
@@ -435,7 +468,7 @@ public class RaftNode {
         }
     }
 
-    public synchronized void heartBeat(){
+    public void heartBeat(){
         if(getState() != NodeState.LEADER){
             return;
         }

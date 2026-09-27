@@ -19,6 +19,8 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
 public class RaftNodeTest {
     private RaftNode node;
@@ -331,8 +333,11 @@ public class RaftNodeTest {
     }
 
     @Test
-    void leader_synchronizes_log() {
-        List<AppendEntriesRequest> laggingPeerRequests = new ArrayList<>();
+    void leader_synchronizes_log() throws InterruptedException {
+        List<AppendEntriesRequest> laggingPeerRequests = new java.util.concurrent.CopyOnWriteArrayList<>();
+        CountDownLatch firstSyncLatch = new CountDownLatch(1);
+        CountDownLatch retryLatch = new CountDownLatch(2);
+        java.util.concurrent.atomic.AtomicBoolean secondRound = new java.util.concurrent.atomic.AtomicBoolean(false);
 
         RaftRpcClient upToDatePeer = new RaftRpcClient() {
             @Override
@@ -352,7 +357,18 @@ public class RaftNodeTest {
         RaftRpcClient laggingPeer = new RaftRpcClient() {
             @Override
             public AppendEntriesResponse sendAppendEntries(AppendEntriesRequest request) {
+                if (request.getEntriesList().isEmpty()) {
+                    return AppendEntriesResponse.newBuilder()
+                            .setSuccess(true)
+                            .setTerm(request.getTerm())
+                            .build();
+                }
                 laggingPeerRequests.add(request);
+                if (secondRound.get()) {
+                    retryLatch.countDown();
+                } else {
+                    firstSyncLatch.countDown();
+                }
                 if (request.getPrevLogIndex() > 0) {
                     return AppendEntriesResponse.newBuilder()
                             .setSuccess(false)
@@ -381,11 +397,14 @@ public class RaftNodeTest {
 
         boolean firstReplicated = leader.replicateLog("k1:v1");
         assertTrue(firstReplicated);
+        assertTrue(firstSyncLatch.await(1, TimeUnit.SECONDS), "Lagging peer should receive first replication entry");
 
         laggingPeerRequests.clear();
+        secondRound.set(true);
 
         boolean secondReplicated = leader.replicateLog("k2:v2");
         assertTrue(secondReplicated);
+        assertTrue(retryLatch.await(1, TimeUnit.SECONDS), "Leader must asynchronously retry with decremented nextIndex");
 
         assertTrue(laggingPeerRequests.size() >= 2, "Leader must retry with decremented nextIndex upon rejection");
 
@@ -613,5 +632,131 @@ public class RaftNodeTest {
 
         assertTrue(response.getSuccess());
         assertEquals(2, node.getLastLogIndex(), "Empty heartbeat must NOT truncate existing unconflicted entries!");
+    }
+
+    @Test
+    void replicateLog_broadcasts_to_all_peers_concurrently() {
+        CountDownLatch allPeersArrived = new CountDownLatch(4);
+        List<RaftRpcClient> peers = new ArrayList<>();
+
+        for (int i = 0; i < 4; i++) {
+            peers.add(new RaftRpcClient() {
+                @Override
+                public AppendEntriesResponse sendAppendEntries(AppendEntriesRequest request) {
+                    allPeersArrived.countDown();
+                    try {
+                        boolean arrived = allPeersArrived.await(500, TimeUnit.MILLISECONDS);
+                        if (!arrived) {
+                            return AppendEntriesResponse.newBuilder()
+                                    .setSuccess(false)
+                                    .setTerm(request.getTerm())
+                                    .build();
+                        }
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        return null;
+                    }
+                    return AppendEntriesResponse.newBuilder()
+                            .setSuccess(true)
+                            .setTerm(request.getTerm())
+                            .build();
+                }
+
+                @Override
+                public RequestVoteResponse sendRequestVote(RequestVoteRequest request) {
+                    return null;
+                }
+            });
+        }
+
+        RaftNode leader = new RaftNode(storageEngine, myPort, peers, newStatePath());
+        leader.becomeLeader();
+
+        boolean result = leader.replicateLog("key1:val1");
+        assertTrue(result, "Concurrent replication should succeed because all 4 peers reach the rendezvous latch concurrently");
+    }
+
+    @Test
+    void replicateLog_short_circuits_and_commits_on_majority_quorum_without_waiting_for_stragglers() {
+        RaftRpcClient fastPeer1 = new RaftRpcClient() {
+            @Override
+            public AppendEntriesResponse sendAppendEntries(AppendEntriesRequest request) {
+                return AppendEntriesResponse.newBuilder()
+                        .setSuccess(true)
+                        .setTerm(request.getTerm())
+                        .build();
+            }
+
+            @Override
+            public RequestVoteResponse sendRequestVote(RequestVoteRequest request) {
+                return null;
+            }
+        };
+
+        RaftRpcClient fastPeer2 = new RaftRpcClient() {
+            @Override
+            public AppendEntriesResponse sendAppendEntries(AppendEntriesRequest request) {
+                return AppendEntriesResponse.newBuilder()
+                        .setSuccess(true)
+                        .setTerm(request.getTerm())
+                        .build();
+            }
+
+            @Override
+            public RequestVoteResponse sendRequestVote(RequestVoteRequest request) {
+                return null;
+            }
+        };
+
+        CountDownLatch slowPeerBlocker = new CountDownLatch(1);
+        RaftRpcClient slowPeer1 = new RaftRpcClient() {
+            @Override
+            public AppendEntriesResponse sendAppendEntries(AppendEntriesRequest request) {
+                try {
+                    slowPeerBlocker.await(5, TimeUnit.SECONDS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+                return AppendEntriesResponse.newBuilder().setSuccess(true).setTerm(request.getTerm()).build();
+            }
+
+            @Override
+            public RequestVoteResponse sendRequestVote(RequestVoteRequest request) {
+                return null;
+            }
+        };
+
+        RaftRpcClient slowPeer2 = new RaftRpcClient() {
+            @Override
+            public AppendEntriesResponse sendAppendEntries(AppendEntriesRequest request) {
+                try {
+                    slowPeerBlocker.await(5, TimeUnit.SECONDS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+                return AppendEntriesResponse.newBuilder().setSuccess(true).setTerm(request.getTerm()).build();
+            }
+
+            @Override
+            public RequestVoteResponse sendRequestVote(RequestVoteRequest request) {
+                return null;
+            }
+        };
+
+        // Notice: slow peers are placed first and third in the list to expose sequential iteration
+        RaftNode leader = new RaftNode(storageEngine, myPort, Arrays.asList(slowPeer1, fastPeer1, slowPeer2, fastPeer2), newStatePath());
+        leader.becomeLeader();
+
+        try {
+            long startTime = System.currentTimeMillis();
+            boolean success = leader.replicateLog("short_circuit:true");
+            long elapsed = System.currentTimeMillis() - startTime;
+
+            assertTrue(success, "Replication must succeed once majority quorum (leader + 2 peers) is reached");
+            assertTrue(elapsed < 1000, "Replication must short-circuit and return immediately without waiting for slow peers! Took: " + elapsed + " ms");
+            assertEquals("true", storageEngine.get("short_circuit"), "Committed value must be applied to state machine");
+        } finally {
+            slowPeerBlocker.countDown();
+        }
     }
 }
