@@ -103,6 +103,8 @@ public class StorageEngine implements StateMachine{
                 return;
             }
 
+            sync();
+
             System.out.println("MemTable full! Swapping to immutable list...");
 
             immutableTables.add(activeTable);
@@ -117,6 +119,7 @@ public class StorageEngine implements StateMachine{
         try{
             System.out.println("MemTable full! Swapping to immutable list...");
 
+            sync();
             immutableTables.add(activeTable);
             activeTable = new MemTable();
         } finally{
@@ -150,5 +153,10 @@ public class StorageEngine implements StateMachine{
         if(splitted.length == 2){
             put(splitted[0], splitted[1]);
         }
+    }
+
+    @Override
+    public void sync() throws IOException{
+        wal.sync();
     }
 }

@@ -19,6 +19,9 @@ public class WriteAheadLog {
     private String filePath;
     private final OutputStream outputStream;
 
+    private int unforcedWrites = 0;
+    private static final int BATCH_SIZE = 100;
+
     public WriteAheadLog(String filePath) throws IOException {
         this.filePath = filePath;
         this.channel = FileChannel.open(
@@ -38,8 +41,19 @@ public class WriteAheadLog {
                 .build();
 
         record.writeDelimitedTo(outputStream);
+        unforcedWrites++;
 
-        channel.force(true);
+        if(unforcedWrites >= BATCH_SIZE){
+            channel.force(true);
+            unforcedWrites = 0;
+        }
+    }
+
+    public synchronized void sync() throws IOException {
+        if(unforcedWrites > 0){
+            channel.force(true);
+            unforcedWrites = 0;
+        }
     }
 
     public List<WalRecord> readAll() throws IOException {

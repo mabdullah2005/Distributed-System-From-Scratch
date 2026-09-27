@@ -35,6 +35,17 @@ public class ServerLauncher {
                 .start();
 
         System.out.println("Node " + myPort + " is online and listening...");
+
+
+        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            try {
+                storageEngine.sync();
+                System.out.println("Node " + myPort + " synced WAL cleanly on shutdown.");
+            } catch (IOException e) {
+                System.err.println("Failed to sync storage engine on shutdown: " + e.getMessage());
+            }
+        }));
+
         server.awaitTermination();
     }
 }
