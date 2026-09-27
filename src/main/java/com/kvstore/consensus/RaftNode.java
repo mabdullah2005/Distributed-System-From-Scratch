@@ -5,6 +5,8 @@ import com.kvstore.network.RaftRpcClient;
 import com.kvstore.storage.StateMachine;
 
 import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Paths;
 import java.util.HashMap;
 import java.util.concurrent.*;
 import java.util.List;
@@ -24,6 +26,7 @@ public class RaftNode {
     private String votedFor;
     private StateMachine stateMachine;
     private RaftLog raftLog;
+    private String stateFilePath;
 
     private final Integer myPort;
     private List<RaftRpcClient> peerPorts;
@@ -37,9 +40,11 @@ public class RaftNode {
     private static final int MIN_TIMER = 150;
     private static final int MAX_TIMER = 300;
 
-    public RaftNode(StateMachine stateMachine, Integer myPort, List<RaftRpcClient> peerPorts){
+    public RaftNode(StateMachine stateMachine,
+                    Integer myPort,
+                    List<RaftRpcClient> peerPorts,
+                    String stateFilePath){
         this.id = "Port" + myPort;
-        this.term = 0;
         this.state = NodeState.FOLLOWER;
         this.commitIndex = 0;
         this.lastApplied = 0;
@@ -47,13 +52,46 @@ public class RaftNode {
         this.myPort = myPort;
         this.peerPorts = peerPorts;
         this.stateMachine = stateMachine;
-
         this.raftLog = new RaftLog();
-        this.votedFor = null;
+
+        this.stateFilePath = stateFilePath;
+        readStateFile();
 
         currentTimer = this.scheduler.schedule(this::startElection,
                 ThreadLocalRandom.current().nextInt(MIN_TIMER, MAX_TIMER),
                 TimeUnit.MILLISECONDS);
+    }
+
+    public RaftNode(StateMachine stateMachine, Integer myPort, List<RaftRpcClient> peerPorts){
+        this(stateMachine, myPort, peerPorts, "raft_state_" + myPort + ".dat");
+    }
+
+    public void readStateFile(){
+        try{
+            if(stateFilePath != null && Files.exists(Paths.get(stateFilePath))){
+                String fileState = Files.readString(Paths.get(stateFilePath));
+                String[] splitted = fileState.split(":", 2);
+                if(splitted.length >= 2){
+                    this.term = Integer.parseInt(splitted[0]);
+                    this.votedFor = splitted[1].isEmpty() ? null : splitted[1];
+                    return;
+                }
+            }
+        } catch (Exception e) {
+            throw new RuntimeException("Fatal: state file read failure", e);
+        }
+
+        this.term = 0;
+        this.votedFor = null;
+    }
+
+    public void persistState(){
+        try{
+            String line = term + ":" + (votedFor != null ? votedFor : "");
+            Files.writeString(Paths.get(stateFilePath), line);
+        } catch (IOException e) {
+            throw new RuntimeException("Fatal: Raft State failed to write on disk", e);
+        }
     }
 
     public synchronized int getTerm(){
@@ -74,6 +112,8 @@ public class RaftNode {
             state = NodeState.FOLLOWER;
             votedFor = null;
         }
+
+        persistState();
     }
 
     public synchronized int getLastLogIndex(){
@@ -82,10 +122,6 @@ public class RaftNode {
 
     public synchronized LogEntry getLogAtIndex(int index){
         return raftLog.getEntry(index);
-    }
-
-    public synchronized void truncateLogFromIndex(int index){
-        raftLog.truncateFromIndex(index);
     }
 
     public synchronized void append(LogEntry entry){
@@ -156,6 +192,7 @@ public class RaftNode {
             state = NodeState.CANDIDATE;
             votedFor = id;
             System.out.println("Timer expired! Starting election for Term " + term);
+            persistState();
         }
 
         broadcastRequestVote();
@@ -194,9 +231,8 @@ public class RaftNode {
             stepDown(requestTerm);
 
             if(raftLog.hasMatchingEntry(requestPrevIndex, request.getPrevLogTerm())){
-                truncateLogFromIndex(requestPrevIndex);
 
-                raftLog.appendAll(getTerm(), request.getEntriesList());
+                raftLog.replicateEntries(requestPrevIndex, requestTerm, request.getEntriesList());
 
                 if(getCommitIndex() < leaderCommitIndex){
                     setCommitIndex(Math.min(leaderCommitIndex, getLastLogIndex()));
@@ -228,6 +264,7 @@ public class RaftNode {
 
                     resetElectionTimer();
                     votedFor = candidateID;
+                    persistState();
 
                     return RequestVoteResponse.newBuilder()
                             .setTerm(requestTerm)

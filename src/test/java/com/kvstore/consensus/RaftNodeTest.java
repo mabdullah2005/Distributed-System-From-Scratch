@@ -30,6 +30,10 @@ public class RaftNodeTest {
     private Path tempDir;
     private String walPath;
 
+    private String newStatePath() {
+        return tempDir.resolve("raft_state_" + java.util.UUID.randomUUID() + ".dat").toString();
+    }
+
     @BeforeEach
     void setUp() throws IOException {
         walPath = tempDir.resolve("_wal.log").toString();
@@ -50,7 +54,7 @@ public class RaftNodeTest {
             }
         };
 
-        node = new RaftNode(storageEngine, myPort, new ArrayList<>(Arrays.asList(rpcClient)));
+        node = new RaftNode(storageEngine, myPort, new ArrayList<>(Arrays.asList(rpcClient)), newStatePath());
     }
 
     @Test
@@ -60,7 +64,7 @@ public class RaftNodeTest {
     }
 
     @Test
-    void consensus_start_election(){
+    void consensus_start_election() {
         node.startElection();
 
         assertEquals(1, node.getTerm());
@@ -76,7 +80,7 @@ public class RaftNodeTest {
     }
 
     @Test
-    void vote_granted_if_havent_voted() throws IOException {
+    void vote_granted_if_havent_voted() {
         RequestVoteRequest request = RequestVoteRequest.newBuilder()
                 .setCandidateId("abc")
                 .setTerm(1)
@@ -158,7 +162,7 @@ public class RaftNodeTest {
     }
 
     @Test
-    void quorum_succeeded(){
+    void quorum_succeeded() {
         RaftRpcClient client = new RaftRpcClient(){
             @Override
             public AppendEntriesResponse sendAppendEntries(AppendEntriesRequest request) {
@@ -190,7 +194,8 @@ public class RaftNodeTest {
         RaftNode raftNode = new RaftNode(
                 storageEngine,
                 myPort,
-                Arrays.asList(client, client2));
+                Arrays.asList(client, client2),
+                newStatePath());
 
         raftNode.becomeLeader();
         boolean result = raftNode.replicateLog("1:abc");
@@ -201,7 +206,7 @@ public class RaftNodeTest {
     }
 
     @Test
-    void quorum_failed(){
+    void quorum_failed() {
         RaftRpcClient client = new RaftRpcClient(){
             @Override
             public AppendEntriesResponse sendAppendEntries(AppendEntriesRequest request) {
@@ -233,7 +238,8 @@ public class RaftNodeTest {
         RaftNode raftNode = new RaftNode(
                 storageEngine,
                 myPort,
-                Arrays.asList(client, client2));
+                Arrays.asList(client, client2),
+                newStatePath());
 
         raftNode.becomeLeader();
         boolean result = raftNode.replicateLog("1:abc");
@@ -244,7 +250,7 @@ public class RaftNodeTest {
     }
 
     @Test
-    void non_leader_log_replication(){
+    void non_leader_log_replication() {
         RaftRpcClient client = new RaftRpcClient(){
             @Override
             public AppendEntriesResponse sendAppendEntries(AppendEntriesRequest request) {
@@ -276,7 +282,8 @@ public class RaftNodeTest {
         RaftNode raftNode = new RaftNode(
                 storageEngine,
                 myPort,
-                Arrays.asList(client, client2));
+                Arrays.asList(client, client2),
+                newStatePath());
 
         assertEquals(NodeState.FOLLOWER, raftNode.getState());
         boolean result = raftNode.replicateLog("1:abc");
@@ -367,7 +374,8 @@ public class RaftNodeTest {
         RaftNode leader = new RaftNode(
                 storageEngine,
                 myPort,
-                Arrays.asList(upToDatePeer, laggingPeer));
+                Arrays.asList(upToDatePeer, laggingPeer),
+                newStatePath());
 
         leader.becomeLeader();
 
@@ -424,7 +432,7 @@ public class RaftNodeTest {
             }
         };
 
-        RaftNode leader = new RaftNode(storageEngine, myPort, Arrays.asList(peer1, peer2));
+        RaftNode leader = new RaftNode(storageEngine, myPort, Arrays.asList(peer1, peer2), newStatePath());
         leader.becomeLeader();
 
         boolean verified = leader.verifyLeadershipQuorum();
@@ -457,7 +465,7 @@ public class RaftNodeTest {
             }
         };
 
-        RaftNode partitionedLeader = new RaftNode(storageEngine, myPort, Arrays.asList(unreachablePeer1, unreachablePeer2));
+        RaftNode partitionedLeader = new RaftNode(storageEngine, myPort, Arrays.asList(unreachablePeer1, unreachablePeer2), newStatePath());
         partitionedLeader.becomeLeader();
 
         boolean verified = partitionedLeader.verifyLeadershipQuorum();
@@ -496,7 +504,7 @@ public class RaftNodeTest {
             }
         };
 
-        RaftNode leader = new RaftNode(storageEngine, myPort, Arrays.asList(higherTermPeer, normalPeer));
+        RaftNode leader = new RaftNode(storageEngine, myPort, Arrays.asList(higherTermPeer, normalPeer), newStatePath());
         leader.becomeLeader();
         int initialTerm = leader.getTerm();
 
@@ -505,5 +513,105 @@ public class RaftNodeTest {
         assertFalse(verified);
         assertEquals(NodeState.FOLLOWER, leader.getState());
         assertEquals(initialTerm + 2, leader.getTerm());
+    }
+
+    @Test
+    void state_persistence_remembers_term_and_prevents_double_voting_after_crash() {
+        String statePath = tempDir.resolve("raft_state_8081.dat").toString();
+
+        RaftNode node1 = new RaftNode(storageEngine, myPort, Arrays.asList(rpcClient), statePath);
+
+        RequestVoteRequest voteRequestFrom8082 = RequestVoteRequest.newBuilder()
+                .setTerm(1)
+                .setCandidateId("Port8082")
+                .setLastLogIndex(0)
+                .setLastLogTerm(0)
+                .build();
+
+        RequestVoteResponse resp1 = node1.handleVoteRequest(voteRequestFrom8082);
+        assertTrue(resp1.getVoteGranted(), "Node should grant vote to first candidate in Term 1");
+
+        RaftNode rebootedNode = new RaftNode(storageEngine, myPort, Arrays.asList(rpcClient), statePath);
+
+        assertEquals(1, rebootedNode.getTerm(), "Rebooted node must recover its persisted term");
+
+        RequestVoteRequest voteRequestFrom8083 = RequestVoteRequest.newBuilder()
+                .setTerm(1)
+                .setCandidateId("Port8083")
+                .setLastLogIndex(0)
+                .setLastLogTerm(0)
+                .build();
+
+        RequestVoteResponse resp2 = rebootedNode.handleVoteRequest(voteRequestFrom8083);
+        assertFalse(resp2.getVoteGranted(), "Rebooted node MUST NOT vote for a different candidate in the same term!");
+
+        RequestVoteResponse retryResp = rebootedNode.handleVoteRequest(voteRequestFrom8082);
+        assertTrue(retryResp.getVoteGranted(), "Rebooted node can re-grant vote to the same candidate in the same term");
+    }
+
+    @Test
+    void state_persistence_recovers_term_after_candidate_election() {
+        String statePath = tempDir.resolve("raft_state_election.dat").toString();
+
+        RaftNode node1 = new RaftNode(storageEngine, myPort, Arrays.asList(rpcClient), statePath);
+        node1.startElection();
+        int electionTerm = node1.getTerm();
+        assertTrue(electionTerm >= 1);
+
+        RaftNode rebootedNode = new RaftNode(storageEngine, myPort, Arrays.asList(rpcClient), statePath);
+        assertEquals(electionTerm, rebootedNode.getTerm(), "Rebooted node must recover term incremented during election");
+
+        RequestVoteRequest rivalVote = RequestVoteRequest.newBuilder()
+                .setTerm(electionTerm)
+                .setCandidateId("Port9999")
+                .setLastLogIndex(0)
+                .setLastLogTerm(0)
+                .build();
+
+        RequestVoteResponse resp = rebootedNode.handleVoteRequest(rivalVote);
+        assertFalse(resp.getVoteGranted(), "Rebooted node voted for itself in this term, so must reject rival candidate");
+    }
+
+    @Test
+    void follower_does_not_truncate_valid_entries_on_duplicate_or_delayed_rpc() {
+        node.append(new LogEntry(1, "k1:v1"));
+        node.append(new LogEntry(1, "k2:v2"));
+        node.append(new LogEntry(1, "k3:v3"));
+
+        AppendEntriesRequest delayedRequest = AppendEntriesRequest.newBuilder()
+                .setTerm(1)
+                .setLeaderId("leader")
+                .setPrevLogIndex(1)
+                .setPrevLogTerm(1)
+                .addEntries("k2:v2")
+                .setLeaderCommitIndex(1)
+                .build();
+
+        AppendEntriesResponse response = node.handleAppendEntry(delayedRequest);
+
+        assertTrue(response.getSuccess());
+        assertEquals(3, node.getLastLogIndex(), "Delayed duplicate RPC must NOT truncate later valid entries!");
+        assertEquals("k1:v1", node.getLogAtIndex(1).command());
+        assertEquals("k2:v2", node.getLogAtIndex(2).command());
+        assertEquals("k3:v3", node.getLogAtIndex(3).command());
+    }
+
+    @Test
+    void follower_does_not_truncate_logs_on_heartbeat_with_older_prev_log_index() {
+        node.append(new LogEntry(1, "k1:v1"));
+        node.append(new LogEntry(1, "k2:v2"));
+
+        AppendEntriesRequest heartbeat = AppendEntriesRequest.newBuilder()
+                .setTerm(1)
+                .setLeaderId("leader")
+                .setPrevLogIndex(0)
+                .setPrevLogTerm(0)
+                .setLeaderCommitIndex(0)
+                .build();
+
+        AppendEntriesResponse response = node.handleAppendEntry(heartbeat);
+
+        assertTrue(response.getSuccess());
+        assertEquals(2, node.getLastLogIndex(), "Empty heartbeat must NOT truncate existing unconflicted entries!");
     }
 }

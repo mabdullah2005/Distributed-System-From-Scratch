@@ -28,9 +28,27 @@ public class RaftLog {
         logs.add(entry);
     }
 
-    public synchronized void appendAll(int term, List<String> entries){
-        for(String entry: entries){
-            append(new LogEntry(term, entry));
+    public synchronized void replicateEntries(int prevLogIndex, int requestTerm, List<String> entries){
+        if(entries == null || entries.isEmpty()){
+            return;
+        }
+
+        try{
+            for(int i = 0; i < entries.size(); i++){
+                int targetIndex = prevLogIndex + 1 + i;
+
+                if(hasMatchingEntry(targetIndex, requestTerm)){
+                    continue;
+                }
+
+                if(targetIndex <= getLastIndex()){
+                    truncateFromIndex(targetIndex - 1);
+                }
+
+                append(new LogEntry(requestTerm, entries.get(i)));
+            }
+        } catch (Exception e) {
+            System.out.println("Raft Log entry replication failed.");
         }
     }
 
