@@ -5,17 +5,22 @@ import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
 
 import java.util.List;
-import java.util.ArrayList;
 
 public class KVClient {
-    private List<Integer> ports;
+    private final List<Integer> ports;
+    private final boolean verbose;
 
-    public KVClient(ArrayList<Integer> ports){
-        this.ports = ports;
+    public KVClient(List<Integer> ports) {
+        this(ports, false);
     }
 
-    public void put(String key, String value){
-        for(Integer port: ports){
+    public KVClient(List<Integer> ports, boolean verbose) {
+        this.ports = ports;
+        this.verbose = verbose;
+    }
+
+    public boolean put(String key, String value) {
+        for (Integer port : ports) {
             ManagedChannel channel = ManagedChannelBuilder
                     .forAddress("localhost", port)
                     .usePlaintext()
@@ -26,24 +31,31 @@ public class KVClient {
                     .setKey(key)
                     .setValue(value)
                     .build();
-            try{
+            try {
                 PutResponse response = stub.put(request);
-                if(response.getSuccessful()){
-                    System.out.println("Success on port: " + port);
-                    return;
+                if (response.getSuccessful()) {
+                    if (verbose) {
+                        System.out.println("Success on port: " + port);
+                    }
+                    return true;
                 }
             } catch (Exception e) {
-                System.out.println("Node" + port + "is down. Retrying...");
-            } finally{
+                if (verbose) {
+                    System.out.println("Node " + port + " is down. Retrying...");
+                }
+            } finally {
                 channel.shutdown();
             }
         }
 
-        System.out.println("Error: could not find leader");
+        if (verbose) {
+            System.err.println("Error: could not find leader");
+        }
+        return false;
     }
 
-    public String get(String key){
-        for(Integer port: ports){
+    public String get(String key) {
+        for (Integer port : ports) {
             ManagedChannel channel = ManagedChannelBuilder
                     .forAddress("localhost", port)
                     .usePlaintext()
@@ -54,24 +66,32 @@ public class KVClient {
                     .setKey(key)
                     .build();
 
-            try{
+            try {
                 GetResponse response = stub.get(request);
-                if(response.getSuccessful()){
-                    if(response.getFound()){
-                        System.out.println("Success on port: " + port);
+                if (response.getSuccessful()) {
+                    if (response.getFound()) {
+                        if (verbose) {
+                            System.out.println("Success on port: " + port);
+                        }
                         return response.getValue();
-                    } else{
-                        System.out.println("Record does not exist.");
+                    } else {
+                        if (verbose) {
+                            System.out.println("Record does not exist.");
+                        }
                         return null;
                     }
                 }
             } catch (Exception e) {
-                System.out.println("Node" + port + "is down. Retrying...");
-            } finally{
+                if (verbose) {
+                    System.out.println("Node " + port + " is down. Retrying...");
+                }
+            } finally {
                 channel.shutdown();
             }
         }
-        System.out.println("Error: No record exists or leader could not be found");
+        if (verbose) {
+            System.err.println("Error: No record exists or leader could not be found");
+        }
         return null;
     }
 }
